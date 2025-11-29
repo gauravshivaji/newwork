@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0, 5, B")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 & 5")
 
 
 # ---------------- DATA LOADER ----------------
@@ -77,7 +77,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------- WAVE 0, 5, B DETECTION ----------------
+# ---------------- WAVE 0 & 5 DETECTION ----------------
 def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
     Wave 0:
@@ -97,32 +97,25 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
         - After 7 candles, price must be higher than at 0:
               Close[i+7] > Close[i]
 
-      Extra rule 2 (0–0 spacing):
+      Extra rule 2 (spacing):
         - If two 0s are closer than 30 candles,
           keep the first one and remove the later one.
 
-      Extra rule 3 (0 after 5 within 30 bars):
-        - When we look between 0s and find a top (future 5/B),
-          if the SECOND 0 is within 30 candles after that top,
-          remove that 0 and recompute segmentation (loop until stable).
+      Final Wave0:
+        base_zero AND future_7_higher, then apply 30-bar spacing filter.
 
-    Wave 5 / B between two 0s (after final 0s are stable):
+    Wave 5:
 
-      For each pair of consecutive Wave0 positions (i0, i1):
-
-        - Look between them: (i0, i1)
-        - Find bar with highest High in that segment → idx_max_high
-
-        If Low at second 0 < Low at first 0:
-            → price fell → corrective leg → mark idx_max_high as Wave B
-        Else:
-            → impulse leg → mark idx_max_high as Wave 5
+      - Take all final Wave0 positions
+      - For each pair of consecutive 0s:
+          look between them (exclusive of second 0)
+          find highest High in that segment
+          mark that bar as Wave 5
     """
     df = df.copy()
 
     df["Wave0"] = False
     df["Wave5"] = False
-    df["WaveB"] = False
 
     needed_cols = {"RSI_14", "Low", "High", "Close"}
     if df.empty or not needed_cols.issubset(df.columns):
@@ -130,10 +123,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     rsi = df["RSI_14"]
     close = df["Close"]
-    low = df["Low"]
-    high = df["High"]
-
-    n = len(df)
 
     # ---- Wave 0 base conditions ----
 
@@ -141,14 +130,16 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     cond_rsi_price = (rsi < 20) & (rsi > rsi.shift(1)) & (close > close.shift(1))
 
     # Condition 2: Extreme 100-bar low (centered 201 bars)
-    rolling_min_low = low.rolling(window=101, center=True, min_periods=1).min()
+    rolling_min_low = df["Low"].rolling(window=101, center=True, min_periods=1).min()
     eps = 1e-8
-    cond_extreme_low = low <= (rolling_min_low + eps)
+    cond_extreme_low = df["Low"] <= (rolling_min_low + eps)
 
     base_zero = cond_rsi_price | cond_extreme_low
 
     # ---- Extra rule 1: after 7 candles, price should be greater than at 0 ----
+    n = len(df)
     future_7_higher = np.zeros(n, dtype=bool)
+
     for i in range(n - 15):
         if close.iloc[i + 15] > close.iloc[i]:
             future_7_higher[i] = True
@@ -158,28 +149,28 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     # ---- Extra rule 2: enforce minimum 30-candle distance between 0s ----
     idx_candidates = np.where(wave0_mask)[0]
-    zeros = []
-    min_gap = 30
+    final_wave0_mask = np.zeros(n, dtype=bool)
+
+    min_gap = 30  # minimum distance between 0s in candles
     last_kept = -10**9
+
     for i in idx_candidates:
         if i - last_kept >= min_gap:
-            zeros.append(i)
+            final_wave0_mask[i] = True
             last_kept = i
+        # else: too close to previous 0, discard this one
 
-    # ---- Extra rule 3: remove 0 that appears within 30 bars after a 5 top ----
-    # We'll iteratively refine the zeros list until stable
-    while True:
-        if len(zeros) < 2:
-            break
+    df["Wave0"] = final_wave0_mask
 
-        zeros_to_keep = np.ones(len(zeros), dtype=bool)
-        changed = False
+    # ---- Wave 5: highest High between two 0s ----
+    wave0_positions = np.where(df["Wave0"].values)[0]
 
-        # For each pair of consecutive zeros, check the top between them
-        for k in range(len(zeros) - 1):
-            start_i = zeros[k]
-            end_i = zeros[k + 1]
+    if len(wave0_positions) >= 2:
+        for k in range(len(wave0_positions) - 1):
+            start_i = wave0_positions[k]
+            end_i = wave0_positions[k + 1]
 
+            # Segment is strictly between the two 0s → (start_i, end_i)
             if end_i - start_i <= 1:
                 continue
 
@@ -188,33 +179,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 continue
 
             idx_max_high = seg["High"].idxmax()
-            top_pos = df.index.get_loc(idx_max_high)  # integer index of that top
-
-            # If second 0 is within 30 candles after this top → remove the second 0
-            if (end_i - top_pos) < 40:
-                zeros_to_keep[k + 1] = False
-                changed = True
-
-        # Rebuild zeros with ones we keep
-        new_zeros = [zeros[i] for i in range(len(zeros)) if zeros_to_keep[i]]
-
-        if not changed:
-            # No changes in this pass → stable
-            zeros = new_zeros
-            break
-        else:
-            zeros = new_zeros
-            # loop again with updated zeros
-
-    # Set final Wave0 mask
-    final_wave0_mask = np.zeros(n, dtype=bool)
-    for i in zeros:
-        final_wave0_mask[i] = True
-
-    df["Wave0"] = final_wave0_mask
-
-    # ---- Wave 5 / B: highest High between two final 0s, classified by direction ----
-   
+            df.loc[idx_max_high, "Wave5"] = True
 
     return df
 
@@ -223,7 +188,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
     Bigger TradingView-style layout:
-    Row 1: Candlestick (larger) + SMA + Wave 0 + Wave 5 + Wave B
+    Row 1: Candlestick (larger) + SMA + Wave 0 + Wave 5
     Row 2: Volume
     Row 3: RSI
     """
@@ -309,23 +274,6 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                 col=1,
             )
 
-    # --- Wave B labels (bold above highs) ---
-    if "WaveB" in df.columns:
-        waveb_df = df[df["WaveB"]]
-        if not waveb_df.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=waveb_df.index,
-                    y=waveb_df["High"] * 1.01,   # slightly above 5
-                    mode="text",
-                    text=["<b>B</b>"] * len(waveb_df),
-                    textposition="middle center",
-                    name="Wave B",
-                ),
-                row=1,
-                col=1,
-            )
-
     # --- Volume ---
     if "Volume" in df.columns:
         fig.add_trace(
@@ -379,16 +327,12 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
 st.sidebar.header("⚙️ Settings")
 
 default_tickers = [
-    "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS",
-"BAJAJ-AUTO.NS", "BAJAJFINSV.NS", "BAJFINANCE.NS", "BHARTIARTL.NS", "BPCL.NS",
-"BRITANNIA.NS", "CIPLA.NS", "COALINDIA.NS", "DIVISLAB.NS", "DRREDDY.NS",
-"EICHERMOT.NS", "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", "HDFCLIFE.NS",
-"HEROMOTOCO.NS", "HINDALCO.NS", "HINDUNILVR.NS", "ICICIBANK.NS", "INDUSINDBK.NS",
-"INFY.NS", "ITC.NS", "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
-"MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS", "POWERGRID.NS", "RELIANCE.NS",
-"SBILIFE.NS", "SBIN.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS",
-"TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS"
-,
+    "RELIANCE.NS",
+    "HDFCBANK.NS",
+    "TCS.NS",
+    "INFY.NS",
+    "ICICIBANK.NS",
+    "NIFTY.NS",
 ]
 
 ticker = st.sidebar.selectbox(
