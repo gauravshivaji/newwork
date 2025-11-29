@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 
 # ---------------- CONFIG ----------------
 st.set_page_config(
-    page_title="Nifty500 Multi-Timeframe Buy/Sell Scanner",
+    page_title="Nifty500 Multi-Timeframe Buy Scanner",
     layout="wide"
 )
 
@@ -19,8 +19,8 @@ st.write(
     """
     - Data from Yahoo Finance (yfinance)  
     - Indicators: **RSI**, **SMA22**, **SMA50**, **SMA200**  
-    - Simple **Elliott-style wave labels (0–5, A–C)**  
-    - **RandomForestClassifier** + your rules to decide Buy = Yes/No  
+    - Simple **Elliott-style wave (single cycle 0–5, A–C)**  
+    - **RandomForestClassifier** + timeframe-specific rules to decide Buy = Yes/No  
     """
 )
 
@@ -40,13 +40,13 @@ def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
     """Download OHLC data for selected timeframe and flatten columns."""
     if timeframe == "Daily":
         interval = "1d"
-        period = "3y"      # more history so SMA200 + RF works
+        period = "3y"      # 3 years for swing trading
     elif timeframe == "Weekly":
         interval = "1wk"
-        period = "10y"     # more history for weekly
+        period = "10y"     # 10 years for position trading
     elif timeframe == "Hourly":
         interval = "60m"
-        period = "60d"
+        period = "60d"     # last 60 days intraday
     else:
         interval = "1d"
         period = "3y"
@@ -81,7 +81,7 @@ def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add RSI + SMAs + distance features."""
     df = df.copy()
-    if "Close" not in df.columns:
+    if "Close" not in df.columns or df.empty:
         return df
 
     close = df["Close"]
@@ -113,46 +113,74 @@ def find_pivots(prices: np.ndarray, order: int = 5):
     return pivots
 
 
-def add_elliott_labels(df: pd.DataFrame, order: int = 5) -> pd.DataFrame:
+def add_elliott_labels(df: pd.DataFrame, timeframe: str, order_map=None) -> pd.DataFrame:
     """
-    Heuristic Elliott-style labelling across the ENTIRE dataset.
+    Elliott-style labelling for ONE cycle that covers MAXIMUM timeframe:
 
-    - Uses all available data (so hourly = last 60 days, daily = last 3 years, weekly = last 10 years).
-    - Finds local pivots (swing highs/lows).
-    - Assigns labels in a repeating cycle:
-        0,1,2,3,4,5,A,B,C,0,1,2,3,4,5,A,B,C, ...
-
-    This means:
-    - If an Elliott-like cycle repeats twice, you'll see two full sequences.
-    - It is still an approximation, not strict Elliott rule validation.
+    - Uses all candles available for that timeframe:
+        Hourly: last 60 days
+        Daily: last 3 years
+        Weekly: last 10 years
+    - Finds ALL pivot points on this data.
+    - Selects up to 9 pivots that are evenly spread from start to end,
+      so the cycle (0–5, A–C) covers the maximum possible time range.
+    - Only those pivots get labels 0,1,2,3,4,5,A,B,C.
+    - Everything else stays NaN.
     """
+
     df = df.copy()
-
-    if "Close" not in df.columns or df.empty:
-        df["elliott_wave"] = np.nan
-        return df
-
-    prices = df["Close"].values
-    pivots = find_pivots(prices, order=order)  # [(index_position, 'low'/'high'), ...]
-
-    # Initialize column
     df["elliott_wave"] = np.nan
 
-    if not pivots:
+    if "Close" not in df.columns or df.empty:
         return df
 
-    # Pattern to repeat across all pivots
+    # Pivot sensitivity based on timeframe
+    if order_map is None:
+        order_map = {
+            "Hourly": 8,   # more smoothing on noisy intraday
+            "Daily": 5,
+            "Weekly": 3,
+        }
+
+    order = order_map.get(timeframe, 5)
+
+    prices = df["Close"].values
+    pivots = find_pivots(prices, order=order)  # list of (bar_index, 'low'/'high')
+
+    m = len(pivots)
+    if m < 5:
+        # Not enough structure to define a clear cycle
+        return df
+
+    # We want up to 9 pivots that span the whole pivot range.
+    if m <= 9:
+        selected = pivots
+    else:
+        # Evenly spaced indices across [0, m-1]
+        step = (m - 1) / (9 - 1)  # float step for 8 intervals
+        idxs = [int(round(k * step)) for k in range(9)]
+        # Keep them unique, in range, and sorted
+        idxs = sorted(set(max(0, min(m - 1, i)) for i in idxs))
+
+        # If due to rounding we got fewer than 9, fill with remaining pivots
+        while len(idxs) < min(9, m):
+            for j in range(m):
+                if j not in idxs:
+                    idxs.append(j)
+                    if len(idxs) == min(9, m):
+                        break
+        idxs = sorted(idxs)
+
+        selected = [pivots[j] for j in idxs]
+
+    # Assign a single cycle 0,1,2,3,4,5,A,B,C to the selected pivots
     wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
-    pattern_len = len(wave_pattern)
 
-    # Sort pivots by time index (just in case)
-    pivots = sorted(pivots, key=lambda x: x[0])
-
-    # Assign labels in a repeating cycle
-    for idx, (bar_idx, kind) in enumerate(pivots):
-        label = wave_pattern[idx % pattern_len]
+    for idx, (bar_idx, kind) in enumerate(selected):
+        if idx >= len(wave_pattern):
+            break
         if 0 <= bar_idx < len(df.index):
-            df.at[df.index[bar_idx], "elliott_wave"] = label
+            df.at[df.index[bar_idx], "elliott_wave"] = wave_pattern[idx]
 
     return df
 
@@ -168,7 +196,7 @@ def last_elliott_label(df: pd.DataFrame):
 
 def detect_bullish_rsi_divergence(df: pd.DataFrame, order: int = 5) -> bool:
     """Price makes lower low, RSI makes higher low."""
-    if "rsi" not in df.columns:
+    if "rsi" not in df.columns or "Close" not in df.columns:
         return False
     df = df.dropna(subset=["rsi"]).copy()
     if len(df) < order * 2 + 2:
@@ -195,7 +223,7 @@ def detect_bullish_rsi_divergence(df: pd.DataFrame, order: int = 5) -> bool:
 
 def near_support(df: pd.DataFrame, tolerance: float = 0.03, order: int = 5) -> bool:
     """Current price close to last swing low (support)."""
-    if len(df) < order * 2 + 1:
+    if "Close" not in df.columns or len(df) < order * 2 + 1:
         return False
 
     closes = df["Close"].values
@@ -214,7 +242,10 @@ def near_support(df: pd.DataFrame, tolerance: float = 0.03, order: int = 5) -> b
     current_price = closes[-1]
     return abs(current_price - support_price) / current_price <= tolerance
 
-def hourly_rules(df):
+
+# --------- TIMEFRAME-SPECIFIC RULES (return decision + reasons) ---------
+
+def hourly_rules(df: pd.DataFrame):
     """
     Short-Term Trading (Hourly)
     - RSI 25–40
@@ -247,7 +278,7 @@ def hourly_rules(df):
     return decision, flags
 
 
-def daily_rules(df):
+def daily_rules(df: pd.DataFrame):
     """
     Swing Trading (Daily)
     - RSI 30–50
@@ -287,7 +318,7 @@ def daily_rules(df):
     return decision, flags
 
 
-def weekly_rules(df):
+def weekly_rules(df: pd.DataFrame):
     """
     Long-Term Position Trading (Weekly)
     - RSI 35–55
@@ -319,7 +350,9 @@ def weekly_rules(df):
     decision = 1 if score >= 2 else 0   # need 2/4
     return decision, flags
 
-def rule_based_buy(df, timeframe):
+
+def rule_based_buy(df: pd.DataFrame, timeframe: str):
+    """Return (decision, flags) depending on timeframe."""
     if timeframe == "Hourly":
         return hourly_rules(df)
     elif timeframe == "Daily":
@@ -327,8 +360,6 @@ def rule_based_buy(df, timeframe):
     elif timeframe == "Weekly":
         return weekly_rules(df)
     return 0, {"Invalid timeframe": False}
-
-
 
 
 def elliott_code_series(df: pd.DataFrame) -> pd.Series:
@@ -351,7 +382,7 @@ def train_rf_and_predict(df: pd.DataFrame):
             return None
 
     df = df.dropna(subset=needed_cols).copy()
-    if len(df) < 50:    # relaxed from 80
+    if len(df) < 50:    # relaxed
         return None
 
     df["fwd_return"] = df["Close"].shift(-5) / df["Close"] - 1
@@ -370,7 +401,7 @@ def train_rf_and_predict(df: pd.DataFrame):
 
     df = df.dropna(subset=feature_cols + ["target"])
 
-    if len(df) < 40 or df["target"].nunique() < 2:  # relaxed from 60
+    if len(df) < 40 or df["target"].nunique() < 2:
         return None
 
     X = df[feature_cols]
@@ -396,7 +427,7 @@ def train_rf_and_predict(df: pd.DataFrame):
     return pred_cls, proba
 
 
-def combined_buy_signal(df, timeframe, return_reason=False):
+def combined_buy_signal(df: pd.DataFrame, timeframe: str, return_reason: bool = False):
     """
     Final decision:
     - Rules give a decision + detailed flags
@@ -445,8 +476,6 @@ def combined_buy_signal(df, timeframe, return_reason=False):
         return final, reason_text
     else:
         return final
-
-
 
 
 def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
@@ -499,7 +528,7 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
         col=1,
     )
 
-    # Elliott labels on price
+    # Elliott labels on price (single cycle)
     if "elliott_wave" in df.columns:
         ell = df["elliott_wave"].dropna()
         for ts, label in ell.items():
@@ -592,7 +621,7 @@ with col1:
     df_focus = load_price_data(focus_ticker, chart_timeframe)
     if not df_focus.empty:
         df_focus = add_indicators(df_focus)
-        df_focus = add_elliott_labels(df_focus)
+        df_focus = add_elliott_labels(df_focus, chart_timeframe)
         plot_chart(df_focus, focus_ticker, chart_timeframe)
     else:
         st.warning("No data for this ticker / timeframe.")
@@ -600,7 +629,8 @@ with col1:
 with col2:
     st.subheader("Current signal (selected ticker)")
     if not df_focus.empty:
-        df_for_sig = add_elliott_labels(add_indicators(df_focus))
+        df_for_sig = add_indicators(df_focus)
+        df_for_sig = add_elliott_labels(df_for_sig, chart_timeframe)
         signal, reason = combined_buy_signal(df_for_sig, chart_timeframe, return_reason=True)
         st.metric(
             label=f"Buy signal ({chart_timeframe})",
@@ -610,7 +640,6 @@ with col2:
         st.markdown(reason)
     else:
         st.write("Signal not available.")
-
 
 st.markdown("---")
 st.subheader("📋 Multi-Timeframe Buy Table")
@@ -635,9 +664,8 @@ if st.button("Run Scan"):
                 continue
 
             df_tf = add_indicators(df_tf)
-            df_tf = add_elliott_labels(df_tf)
+            df_tf = add_elliott_labels(df_tf, tf)
             decision = combined_buy_signal(df_tf, tf)
-
             row[col_name] = decision
 
         rows.append(row)
@@ -649,8 +677,8 @@ if st.button("Run Scan"):
     result_df = pd.DataFrame(rows)
     st.dataframe(result_df, use_container_width=True)
     st.caption(
-        "✅ 'Yes' = RandomForest predicts upside (if enough data) AND your buy rules "
-        "(RSI near 30 + divergence + SMA zone + support + Elliott 0/2/4/None) are satisfied. "
+        "✅ 'Yes' = RandomForest (if enough data) + timeframe-specific rules "
+        "(RSI, SMA, support, Elliott) agree on bullish setup. "
         "If RF has no data, result is based only on rules."
     )
 else:
