@@ -97,7 +97,7 @@ hourly_start = today - timedelta(days=60)       # 60 days
 # ------------- DATA DOWNLOAD FUNCTION -------------
 @st.cache_data(show_spinner=True)
 def load_data(ticker_symbol, start, end, interval="1d"):
-    """Download OHLCV data from Yahoo Finance."""
+    """Download OHLCV data from Yahoo Finance and clean it."""
     df = yf.download(
         ticker_symbol,
         start=start,
@@ -113,12 +113,24 @@ def load_data(ticker_symbol, start, end, interval="1d"):
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
 
-    # Ensure numeric OHLC so candlestick works
+    # 🔹 If columns are MultiIndex (e.g. ('Open','RELIANCE.NS')), flatten them
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            col[0] if isinstance(col, tuple) else col
+            for col in df.columns
+        ]
+
+    # 🔹 Ensure OHLC are numeric (Series, not DataFrame)
     for col in ["Open", "High", "Low", "Close"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            series = df[col]
+            if isinstance(series, pd.DataFrame):
+                series = series.iloc[:, 0]
+            df[col] = pd.to_numeric(series, errors="coerce")
 
+    # Drop rows where price candles are invalid
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
     return df
 
 # ------------- INDICATOR CALCULATION -------------
@@ -154,7 +166,7 @@ def plot_price_and_sma(df: pd.DataFrame, title_suffix: str):
         name="Price (Candle)"
     ))
 
-    # Close line (extra clear)
+    # Close line
     fig_price.add_trace(go.Scatter(
         x=df.index,
         y=df["Close"],
