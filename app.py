@@ -74,16 +74,12 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
     """
     Loose Elliott + custom rules:
 
-    Base loose impulse logic:
-      - Detect pivots (zigzag-like).
-      - Look for L-H-L-H-L-H sequence as 0-1-2-3-4-5 (uptrend).
-      - Loose rules for wave lengths, overlaps, RSI, etc.
-
-    Your extra rules:
-      (1) If RSI is oversold for a long time before the starting low,
-          mark that pivot as Wave 0.
-      (2) If we find a higher high after Wave 3, update label to that newer pivot.
-      (3) If we find a higher high after Wave 5, update label to that newer pivot.
+    - Loose impulse rules (1–5).
+    - Your rules:
+        1) If RSI oversold for long time before start low → mark that as 0.
+        2) If we find HH between 3 and 4 → update 3 to that pivot.
+        3) If we find HH after 5 → update 5 to that pivot,
+           EXCEPT when retracement after 5 is 38.2–61.8% of wave-5 leg.
     """
     df = df.copy()
     needed = {"High", "Low", "Close"}
@@ -206,12 +202,12 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
         return df
 
     # ---------- YOUR RULE 2 & 3: dynamic update of wave 3 and 5 ----------
-    # Re-read w0..w5 from pivots
     w0, w1, w2, w3, w4, w5 = best_seq
     h3 = w3["price"]
     h5 = w5["price"]
+    l4 = w4["price"]
 
-    # Find index positions in the full pivot list
+    # Indices in pivot list
     idx0 = best_start
     idx1 = best_start + 1
     idx2 = best_start + 2
@@ -219,32 +215,68 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
     idx4 = best_start + 4
     idx5 = best_start + 5
 
-    # Rule: if we found HH after 3rd pivot, update wave 3 to new higher high
-    # Search pivots strictly between current 3 and 4
+    # Rule: if we found HH between current 3 and 4, update wave 3
     if idx3 + 1 < idx4:
         slice_3 = pivots[idx3 + 1:idx4]
         better_highs_3 = [p for p in slice_3 if p["type"] == "H" and p["price"] > h3 * 1.001]
         if better_highs_3:
-            # choose the highest high
             new_w3 = max(better_highs_3, key=lambda p: p["price"])
             w3 = new_w3
             h3 = w3["price"]
-            best_seq[3] = w3  # update sequence
+            best_seq[3] = w3
 
-    # Rule: if we found HH after 5th pivot, update wave 5 to new higher high
+    # NEW RULE: Wave 5 re-labelling blocked by golden-zone retrace
+    # We only allow updating 5 to a later higher high if the retracement
+    # between current 5 and that candidate is NOT 38.2–61.8% of wave-5 leg.
     if idx5 + 1 < len(pivots):
         slice_5 = pivots[idx5 + 1:]
-        better_highs_5 = [p for p in slice_5 if p["type"] == "H" and p["price"] > h5 * 1.001]
-        if better_highs_5:
-            # choose the last highest high (latest pivot with highest price)
-            max_price = max(p["price"] for p in better_highs_5)
-            candidates = [p for p in better_highs_5 if p["price"] == max_price]
-            new_w5 = candidates[-1]
+
+        allowed_candidates = []
+        for cand in slice_5:
+            if cand["type"] != "H":
+                continue
+            if cand["price"] <= h5 * 1.001:
+                continue
+
+            # Find lows between w5 and this candidate
+            try:
+                pos5 = df.index.get_loc(w5["idx"])
+                pos_c = df.index.get_loc(cand["idx"])
+            except KeyError:
+                continue
+            if pos_c <= pos5 + 1:
+                continue
+
+            lows_section = df["Low"].iloc[pos5 + 1:pos_c + 1]
+            if lows_section.empty:
+                continue
+            min_low_after5 = float(lows_section.min())
+
+            leg5 = h5 - l4
+            if leg5 <= 0:
+                # if wave-5 leg is invalid, just allow candidate
+                allowed_candidates.append(cand)
+                continue
+
+            retrace = (h5 - min_low_after5) / leg5
+
+            # If retracement is in 38.2%–61.8% range, DO NOT update 5 to this HH
+            if 0.382 <= retrace <= 0.618:
+                # skip this candidate (locks existing wave 5)
+                continue
+
+            # otherwise this HH is allowed as new wave 5 candidate
+            allowed_candidates.append(cand)
+
+        if allowed_candidates:
+            max_price = max(p["price"] for p in allowed_candidates)
+            candidates_max = [p for p in allowed_candidates if p["price"] == max_price]
+            new_w5 = candidates_max[-1]
             w5 = new_w5
             h5 = w5["price"]
             best_seq[5] = w5
 
-    # Reassign after update
+    # Repack after possible updates
     w0, w1, w2, w3, w4, w5 = best_seq
 
     # ---------- YOUR RULE 1: mark Wave 0 when RSI oversold for long time ----------
@@ -254,18 +286,17 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
             start_pos = max(0, pos0 - 10)  # look back 10 bars
             window = df.iloc[start_pos:pos0 + 1]
             oversold = window["RSI_14"] < 30
-            # "for long time" → at least 5 bars oversold in that lookback
             if oversold.sum() >= 5:
                 df.loc[w0["idx"], "Elliott_Label"] = "0"
                 df.loc[w0["idx"], "Elliott_Pivot_Type"] = "L"
         except KeyError:
             pass
 
-    # ---------- Assign 1–5 labels (using possibly updated 3 & 5) ----------
+    # ---------- Assign 1–5 labels ----------
     impulse_labels = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
     for i, p in enumerate(best_seq):
         if i == 0:
-            continue  # wave 0 already handled separately
+            continue  # wave 0 already handled
         lbl = impulse_labels.get(i)
         if lbl is None:
             continue
@@ -279,17 +310,13 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
             A, B, C = tail[0], tail[1], tail[2]
             tA, tB, tC = A["type"], B["type"], C["type"]
 
-            # Expect down correction after bullish impulse: L-H-L
             if [tA, tB, tC] == ["L", "H", "L"]:
                 low5 = w5["price"]
                 lowA, highB, lowC = A["price"], B["price"], C["price"]
 
-                # A should be real down move from wave5
                 if lowA < low5 * 1.02:
                     high5 = w5["price"]
-                    # B can exceed wave5 high by up to ~10% (expanded flat)
                     if highB <= high5 * 1.10:
-                        # C usually goes below A, but failed C allowed up to ~2% above
                         if lowC <= lowA * 1.02:
                             lenA = high5 - lowA
                             lenC = highB - lowC
@@ -353,16 +380,16 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                 col=1,
             )
 
-    # Elliott labels (0,1,2,3,4,5,A,B,C)
+    # Elliott labels
     if "Elliott_Label" in df.columns:
         label_df = df[df["Elliott_Label"].notna()]
         if not label_df.empty:
             ys = []
             for _, row in label_df.iterrows():
                 if "Elliott_Pivot_Type" in row and row["Elliott_Pivot_Type"] == "L":
-                    ys.append(row["Low"] * 0.995)   # below lows
+                    ys.append(row["Low"] * 0.995)
                 else:
-                    ys.append(row["High"] * 1.005)  # above highs
+                    ys.append(row["High"] * 1.005)
 
             fig.add_trace(
                 go.Scatter(
