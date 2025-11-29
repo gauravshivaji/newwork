@@ -19,7 +19,7 @@ st.write(
     """
     - Data from Yahoo Finance (yfinance)  
     - Indicators: **RSI**, **SMA22**, **SMA50**, **SMA200**  
-    - Simple **Elliott-style wave (single cycle 0–5, A–C)**  
+    - Elliott Wave (single 9-pivot cycle 0–5, A–C based on your rulebook)  
     - **RandomForestClassifier** + timeframe-specific rules to decide Buy = Yes/No  
     """
 )
@@ -33,7 +33,7 @@ NIFTY500_TICKERS = [
     # TODO: paste your full list here...
 ]
 
-# ---------------- HELPER FUNCTIONS ----------------
+# ---------------- DATA & INDICATORS ----------------
 
 @st.cache_data(show_spinner=False)
 def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
@@ -100,8 +100,28 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ---------- ELLIOTT WAVE ENGINE (9-PIVOT MODEL) ----------
+
+def get_timeframe_params(timeframe: str):
+    """
+    Parameters tuned per timeframe:
+    - order: pivot window size (smoothness)
+    - min_pct: minimum % move between pivots
+    """
+    if timeframe == "Hourly":
+        return {"order": 6, "min_pct": 0.02}   # 2% swings
+    elif timeframe == "Daily":
+        return {"order": 5, "min_pct": 0.04}   # 4% swings
+    elif timeframe == "Weekly":
+        return {"order": 4, "min_pct": 0.06}   # 6% swings
+    return {"order": 5, "min_pct": 0.04}
+
+
 def find_pivots(prices: np.ndarray, order: int = 5):
-    """Simple local high/low pivots for Elliott-like labelling."""
+    """
+    Local high/low pivots:
+    - 'order' bars on each side must be smaller/bigger.
+    """
     pivots = []
     n = len(prices)
     for i in range(order, n - order):
@@ -113,74 +133,251 @@ def find_pivots(prices: np.ndarray, order: int = 5):
     return pivots
 
 
-def add_elliott_labels(df: pd.DataFrame, timeframe: str, order_map=None) -> pd.DataFrame:
+def filter_pivots_min_move(prices: np.ndarray, pivots, min_pct: float):
     """
-    Elliott-style labelling for ONE cycle that covers MAXIMUM timeframe:
+    Keep only pivots where consecutive pivots differ by at least min_pct.
+    Ensures 'swing > threshold' rule.
+    """
+    if not pivots:
+        return []
 
-    - Uses all candles available for that timeframe:
-        Hourly: last 60 days
-        Daily: last 3 years
-        Weekly: last 10 years
-    - Finds ALL pivot points on this data.
-    - Selects up to 9 pivots that are evenly spread from start to end,
-      so the cycle (0–5, A–C) covers the maximum possible time range.
-    - Only those pivots get labels 0,1,2,3,4,5,A,B,C.
-    - Everything else stays NaN.
+    filtered = [pivots[0]]
+    last_idx, _ = pivots[0]
+    last_price = prices[last_idx]
+
+    for idx, kind in pivots[1:]:
+        p = prices[idx]
+        if abs(p - last_price) / last_price >= min_pct:
+            filtered.append((idx, kind))
+            last_idx, last_price = idx, p
+
+    return filtered
+
+
+def is_alternating(seq):
+    """Check high/low alternation."""
+    if len(seq) < 2:
+        return False
+    last_kind = seq[0][1]
+    for _, kind in seq[1:]:
+        if kind == last_kind:
+            return False
+        last_kind = kind
+    return True
+
+
+def fib_ratio(a, b):
+    """Safe Fibonacci-like ratio helper."""
+    if b == 0:
+        return None
+    return abs(a / b)
+
+
+def score_fib(value, target, tol=0.25):
+    """
+    Score 0-1 based on how close 'value' is to 'target' within tolerance.
+    """
+    if value is None:
+        return 0.0
+    if value <= 0:
+        return 0.0
+    diff = abs(value - target) / target
+    if diff > tol:
+        return 0.0
+    return max(0.0, 1.0 - diff / tol)
+
+
+def check_impulse_correction_rules(prices, seq):
+    """
+    Apply core impulse (0-5) + correction (A,B,C = 6,7,8) rules.
+
+    seq = list of 9 pivots: [(idx0,kind0),...,(idx8,kind8)]
+    Returns (valid: bool, score: float, trend: 'up'/'down')
     """
 
+    # Extract indices & prices
+    idxs = [i for i, _ in seq]
+    kinds = [k for _, k in seq]
+    p = [prices[i] for i in idxs]
+
+    # Decide trend (up or down) based on W0->W1
+    if p[1] > p[0]:
+        trend = "up"
+    elif p[1] < p[0]:
+        trend = "down"
+    else:
+        return False, 0.0, None
+
+    # For downtrend, mirror the prices to reuse same rules
+    if trend == "down":
+        p = [-x for x in p]  # invert so we treat it as uptrend
+
+    # Now p is "bull" impulse in either case
+
+    # Name them for clarity
+    W0, W1, W2, W3, W4, W5, W6, W7, W8 = p
+
+    score = 0.0
+
+    # ---- RULE 1: Wave 2 never retraces 100% of Wave 1 (W2 > W0) ----
+    if W2 <= W0:
+        return False, 0.0, None
+    retr2 = (W1 - W2) / (W1 - W0 + 1e-9)
+    # allow around 0.3–0.9
+    if 0.3 <= retr2 <= 0.9:
+        # closer to 0.5–0.8 is better
+        score += score_fib(retr2, 0.618, tol=0.4)
+    else:
+        return False, 0.0, None
+
+    # ---- RULE 4: Wave 3 must break Wave 1 high (W3 > W1) ----
+    if W3 <= W1:
+        return False, 0.0, None
+    # Wave 3 length vs Wave 1 & Wave 5
+    len1 = W1 - W0
+    len3 = W3 - W2
+    len5 = W5 - W4
+
+    # ---- RULE 2: Wave 3 never the shortest ----
+    if len3 <= 0 or len3 <= min(len1, len5):
+        return False, 0.0, None
+    # reward if approx 1.618 * len1
+    r31 = fib_ratio(len3, len1)
+    score += score_fib(r31, 1.618, tol=0.6)
+
+    # ---- RULE 3: Wave 4 never enters Wave 1 territory (uptrend) ----
+    # W4 low must be above W1 high -> W4 > W1
+    if W4 <= W1:
+        return False, 0.0, None
+    # Wave 4 retrace 23.6–38.2% of Wave 3 (soft)
+    retr4 = (W3 - W4) / (W3 - W2 + 1e-9)
+    if 0.1 <= retr4 <= 0.6:
+        score += score_fib(retr4, 0.382, tol=0.4)
+
+    # ---- RULE 5: Wave 5 makes higher high than Wave 3 ----
+    if W5 < W3 * 0.98:  # allow small truncation chance
+        return False, 0.0, None
+    # reward if len5 ~ 0.618 of len1 or len3
+    r51 = fib_ratio(len5, len1)
+    r53 = fib_ratio(len5, len3)
+    score += max(score_fib(r51, 0.618, tol=0.6),
+                 score_fib(r53, 0.618, tol=0.6))
+
+    # ---- RULE 7: Wave A (W6) starts correction, breaks W4 area ----
+    if W6 >= W4:
+        # must break below W4 in uptrend
+        return False, 0.0, None
+
+    # ---- RULE 8: Wave B (W7) cannot exceed Wave 5 (usually) ----
+    if W7 > W5 * 1.02:
+        # small leeway, otherwise invalid
+        return False, 0.0, None
+
+    # B retracement 38–78% of A (soft)
+    retr_B = (W7 - W6) / (W5 - W6 + 1e-9)
+    if 0.2 <= retr_B <= 0.9:
+        score += score_fib(retr_B, 0.5, tol=0.5)
+
+    # ---- RULE 9: Wave C (W8) must break Wave A low ----
+    if W8 >= W6:
+        return False, 0.0, None
+
+    # C often = A or 1.618 × A
+    lenA = W6 - W5
+    lenC = W8 - W7
+    rCA = fib_ratio(lenC, lenA)
+    score += max(
+        score_fib(rCA, 1.0, tol=0.6),
+        score_fib(rCA, 1.618, tol=0.6),
+    )
+
+    # additional small rewards for general shape
+    if W1 > W0 and W3 > W1 and W5 > W3:
+        score += 0.5
+
+    return True, score, trend
+
+
+def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
+    """
+    Core detector:
+    - Build pivots
+    - Filter by minimum % move
+    - Scan all 9-pivot windows
+    - Keep windows with alternating high/low + valid rules
+    - Choose the one with maximum time span; tie-breaker: higher score
+    Returns: dict {bar_index: label_char}, or {} if none found.
+    """
+    params = get_timeframe_params(timeframe)
+    order = params["order"]
+    min_pct = params["min_pct"]
+
+    raw_pivots = find_pivots(prices, order=order)
+    pivots = filter_pivots_min_move(prices, raw_pivots, min_pct=min_pct)
+
+    m = len(pivots)
+    if m < 9:
+        return {}
+
+    best = None  # (span, score, start_idx, labels_map)
+
+    for start in range(0, m - 9 + 1):
+        window = pivots[start:start + 9]  # 9 pivots
+        if not is_alternating(window):
+            continue
+
+        valid, score, trend = check_impulse_correction_rules(prices, window)
+        if not valid:
+            continue
+
+        idxs = [i for i, _ in window]
+        span = idxs[-1] - idxs[0]  # time span covered in bars
+
+        labels_map = {}
+        wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
+        for w_idx, (bar_idx, kind) in enumerate(window):
+            labels_map[bar_idx] = wave_pattern[w_idx]
+
+        candidate = (span, score, start, labels_map)
+
+        if best is None:
+            best = candidate
+        else:
+            best_span, best_score, _, _ = best
+            # prefer larger span; if similar, prefer higher score
+            if span > best_span * 1.05:
+                best = candidate
+            elif abs(span - best_span) <= best_span * 0.05 and score > best_score:
+                best = candidate
+
+    if best is None:
+        return {}
+
+    return best[3]  # labels_map: bar_idx -> "0".."C"
+
+
+def add_elliott_labels(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """
+    Wrapper used by the app:
+    - Uses detect_best_elliott_cycle
+    - Writes 'elliott_wave' column with 0..5,A,B,C for chosen pivots
+      and NaN elsewhere.
+    """
     df = df.copy()
     df["elliott_wave"] = np.nan
 
     if "Close" not in df.columns or df.empty:
         return df
 
-    # Pivot sensitivity based on timeframe
-    if order_map is None:
-        order_map = {
-            "Hourly": 8,   # more smoothing on noisy intraday
-            "Daily": 5,
-            "Weekly": 3,
-        }
-
-    order = order_map.get(timeframe, 5)
-
     prices = df["Close"].values
-    pivots = find_pivots(prices, order=order)  # list of (bar_index, 'low'/'high')
+    labels_map = detect_best_elliott_cycle(prices, timeframe)
 
-    m = len(pivots)
-    if m < 5:
-        # Not enough structure to define a clear cycle
+    if not labels_map:
         return df
 
-    # We want up to 9 pivots that span the whole pivot range.
-    if m <= 9:
-        selected = pivots
-    else:
-        # Evenly spaced indices across [0, m-1]
-        step = (m - 1) / (9 - 1)  # float step for 8 intervals
-        idxs = [int(round(k * step)) for k in range(9)]
-        # Keep them unique, in range, and sorted
-        idxs = sorted(set(max(0, min(m - 1, i)) for i in idxs))
-
-        # If due to rounding we got fewer than 9, fill with remaining pivots
-        while len(idxs) < min(9, m):
-            for j in range(m):
-                if j not in idxs:
-                    idxs.append(j)
-                    if len(idxs) == min(9, m):
-                        break
-        idxs = sorted(idxs)
-
-        selected = [pivots[j] for j in idxs]
-
-    # Assign a single cycle 0,1,2,3,4,5,A,B,C to the selected pivots
-    wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
-
-    for idx, (bar_idx, kind) in enumerate(selected):
-        if idx >= len(wave_pattern):
-            break
+    for bar_idx, label in labels_map.items():
         if 0 <= bar_idx < len(df.index):
-            df.at[df.index[bar_idx], "elliott_wave"] = wave_pattern[idx]
+            df.at[df.index[bar_idx], "elliott_wave"] = label
 
     return df
 
@@ -193,6 +390,8 @@ def last_elliott_label(df: pd.DataFrame):
         return None
     return s.iloc[-1]
 
+
+# ---------- SUPPORT / DIVERGENCE HELPERS ----------
 
 def detect_bullish_rsi_divergence(df: pd.DataFrame, order: int = 5) -> bool:
     """Price makes lower low, RSI makes higher low."""
@@ -370,6 +569,8 @@ def elliott_code_series(df: pd.DataFrame) -> pd.Series:
     return df["elliott_wave"].map(mapping).fillna(-1)
 
 
+# ---------- RANDOM FOREST MODEL ----------
+
 def train_rf_and_predict(df: pd.DataFrame):
     """
     Train a small RandomForest on past data:
@@ -478,6 +679,8 @@ def combined_buy_signal(df: pd.DataFrame, timeframe: str, return_reason: bool = 
         return final
 
 
+# ---------- PLOTTING ----------
+
 def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
     needed_cols = ["Open", "High", "Low", "Close", "sma22", "sma50", "sma200", "rsi"]
     for c in needed_cols:
@@ -528,7 +731,7 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
         col=1,
     )
 
-    # Elliott labels on price (single cycle)
+    # Elliott labels on price (single best cycle)
     if "elliott_wave" in df.columns:
         ell = df["elliott_wave"].dropna()
         for ts, label in ell.items():
@@ -584,6 +787,7 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
 
 
 # ---------------- SIDEBAR UI ----------------
+
 st.sidebar.header("⚙️ Scanner Settings")
 
 chart_timeframe = st.sidebar.radio(
@@ -614,6 +818,7 @@ focus_ticker = st.selectbox(
 )
 
 # ---------------- MAIN LAYOUT ----------------
+
 col1, col2 = st.columns([2, 1])
 
 with col1:
