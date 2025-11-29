@@ -77,58 +77,23 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------- WAVE 0 DETECTION (UPTREND THUMB RULE, RSI < 20) ----------------
+# ---------------- WAVE 0 DETECTION (RSI < 20 ONLY) ----------------
 def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Wave 0 (Uptrend) Thumb Rule with stricter RSI:
+    Mark Wave 0 wherever RSI < 20.
+    No pivot check.
+    No future higher high check.
+    No trend check.
 
-    Wave 0 = LAST pivot low where:
-      - It's a swing low (pivot low):
-            Low[i] < Low[i-1] and Low[i] < Low[i+1]
-      - RSI_14[i] < 20   (very oversold / strong exhaustion)
-      - There exists a future bar j > i with High[j] > High[i] (Higher High)
-
-    Only the LAST such pivot is marked as Wave 0 to avoid clutter.
+    Wave0 = (RSI_14 < 20)
     """
     df = df.copy()
     df["Wave0"] = False
 
-    if df.empty or "Low" not in df.columns or "High" not in df.columns or "RSI_14" not in df.columns:
+    if df.empty or "RSI_14" not in df.columns:
         return df
 
-    lows = df["Low"].values
-    highs = df["High"].values
-    rsi = df["RSI_14"].values
-    n = len(df)
-
-    last_idx = None
-
-    # Start from bar 1 to n-2 to safely look at i-1 and i+1
-    for i in range(1, n - 1):
-        # Pivot low condition (swing low)
-        if not (lows[i] < lows[i - 1] and lows[i] < lows[i + 1]):
-            continue
-
-        # RSI very oversold
-        if np.isnan(rsi[i]) or rsi[i] >= 20:
-            continue
-
-        # Check for future Higher High
-        if i + 1 >= n:
-            continue
-        future_max_high = np.nanmax(highs[i + 1 :])
-        if np.isnan(future_max_high):
-            continue
-        if future_max_high <= highs[i]:
-            continue
-
-        # If all conditions satisfied, remember this as a candidate
-        last_idx = i
-
-    # Mark only the last valid Wave 0 pivot
-    if last_idx is not None:
-        df.iloc[last_idx, df.columns.get_loc("Wave0")] = True
-
+    df.loc[df["RSI_14"] < 20, "Wave0"] = True
     return df
 
 
