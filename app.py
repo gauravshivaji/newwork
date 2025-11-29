@@ -191,7 +191,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
             top_pos = df.index.get_loc(idx_max_high)  # integer index of that top
 
             # If second 0 is within 30 candles after this top → remove the second 0
-            if (end_i - top_pos) < 30:
+            if (end_i - top_pos) < 40:
                 zeros_to_keep[k + 1] = False
                 changed = True
 
