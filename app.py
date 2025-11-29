@@ -98,15 +98,17 @@ def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     # Condition 1: RSI < 20
-    cond_rsi = df["RSI_14"] < 20
+    rsi = df["RSI_14"]
+
+    # Condition 1: RSI < 20 AND RSI is rising (current > previous)
+    cond_rsi_turn_up = (rsi < 20) & (rsi > rsi.shift(1))
 
     # Condition 2: Lowest low in 100 candles back and forth (window=201, centered)
-    rolling_min_low = df["Low"].rolling(window=101, center=True, min_periods=1).min()
-    # Use small epsilon to avoid float issues
+    rolling_min_low = df["Low"].rolling(window=201, center=True, min_periods=1).min()
     eps = 1e-8
     cond_extreme_low = df["Low"] <= (rolling_min_low + eps)
 
-    df.loc[cond_rsi | cond_extreme_low, "Wave0"] = True
+    df.loc[cond_rsi_turn_up | cond_extreme_low, "Wave0"] = True
     return df
 
 
