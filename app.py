@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 & 5")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0, 5, B")
 
 
 # ---------------- DATA LOADER ----------------
@@ -77,7 +77,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------- WAVE 0 & 5 DETECTION ----------------
+# ---------------- WAVE 0, 5, B DETECTION ----------------
 def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
     Wave 0:
@@ -104,18 +104,25 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
       Final Wave0:
         base_zero AND future_7_higher, then apply 30-bar spacing filter.
 
-    Wave 5:
+    Wave 5 / B between two 0s:
 
-      - Take all final Wave0 positions
-      - For each pair of consecutive 0s:
-          look between them (exclusive of second 0)
-          find highest High in that segment
-          mark that bar as Wave 5
+      For each pair of consecutive Wave0 positions (i0, i1):
+
+        - Look between them: (i0, i1)
+        - Find bar with highest High in that segment → idx_max_high
+
+        If Low at second 0 < Low at first 0:
+            → down structure, treat as correction
+            → mark idx_max_high as Wave B
+        Else:
+            → up impulse
+            → mark idx_max_high as Wave 5
     """
     df = df.copy()
 
     df["Wave0"] = False
     df["Wave5"] = False
+    df["WaveB"] = False
 
     needed_cols = {"RSI_14", "Low", "High", "Close"}
     if df.empty or not needed_cols.issubset(df.columns):
@@ -162,7 +169,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Wave0"] = final_wave0_mask
 
-    # ---- Wave 5: highest High between two 0s ----
+    # ---- Wave 5 / B: highest High between two 0s, classified by direction ----
     wave0_positions = np.where(df["Wave0"].values)[0]
 
     if len(wave0_positions) >= 2:
@@ -179,7 +186,17 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 continue
 
             idx_max_high = seg["High"].idxmax()
-            df.loc[idx_max_high, "Wave5"] = True
+
+            # Compare lows of the two 0s
+            low_start = df["Low"].iloc[start_i]
+            low_end = df["Low"].iloc[end_i]
+
+            if low_end < low_start:
+                # Second 0 is lower → price fell → treat as ABC, mark B
+                df.loc[idx_max_high, "WaveB"] = True
+            else:
+                # Second 0 is higher or equal → up impulse → mark 5
+                df.loc[idx_max_high, "Wave5"] = True
 
     return df
 
@@ -188,7 +205,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
     Bigger TradingView-style layout:
-    Row 1: Candlestick (larger) + SMA + Wave 0 + Wave 5
+    Row 1: Candlestick (larger) + SMA + Wave 0 + Wave 5 + Wave B
     Row 2: Volume
     Row 3: RSI
     """
@@ -269,6 +286,23 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     text=["<b>5</b>"] * len(wave5_df),
                     textposition="middle center",
                     name="Wave 5",
+                ),
+                row=1,
+                col=1,
+            )
+
+    # --- Wave B labels (bold above highs, separate from 5) ---
+    if "WaveB" in df.columns:
+        waveb_df = df[df["WaveB"]]
+        if not waveb_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=waveb_df.index,
+                    y=waveb_df["High"] * 1.01,   # slightly above 5
+                    mode="text",
+                    text=["<b>B</b>"] * len(waveb_df),
+                    textposition="middle center",
+                    name="Wave B",
                 ),
                 row=1,
                 col=1,
