@@ -162,7 +162,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     x=wave0_df.index,
                     y=wave0_df["Low"] * 0.995,  # slightly below the low
                     mode="text",
-                    text=["0"] * len(wave0_df),
+                    text=["<b>0</b>"] * len(wave0_df),
                     textposition="middle center",
                     name="Wave 0 (RSI < 20)",
                 ),
