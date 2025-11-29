@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (RSI < 20 OR 100-bar Extreme Low)")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 & 5")
 
 
 # ---------------- DATA LOADER ----------------
@@ -77,30 +77,38 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------- WAVE 0 DETECTION ----------------
-def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
+# ---------------- WAVE 0 & 5 DETECTION ----------------
+def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Mark Wave 0 when EITHER condition is true:
+    Wave 0:
+      - Condition 1 (RSI + price):
+          RSI < 20
+          AND RSI rising (rsi[i] > rsi[i-1])
+          AND Close rising (close[i] > close[i-1])
+      - OR Condition 2 (structural low):
+          Low is lowest in centered 201-bar window (100 back + 100 forward)
 
-    1️⃣ RSI condition:
-       - RSI_14 < 20  (very oversold)
+      Wave0 = cond_rsi_price OR cond_extreme_low
 
-    2️⃣ 100-candle extreme-low condition:
-       - Low is the minimum in a centered window of 100 bars back and 100 bars forward
-         → i.e., rolling window of 201 candles (center=True).
-
-    Wave0 = (RSI_14 < 20) OR (Low == rolling_min(Low, window=201, center=True))
+    Wave 5:
+      - Take all Wave0 positions
+      - For each pair of consecutive 0s:
+          look between them (exclusive of second 0)
+          find highest High in that segment
+          mark that bar as Wave 5
     """
     df = df.copy()
-    df["Wave0"] = False
 
-    if df.empty or "RSI_14" not in df.columns or "Low" not in df.columns:
+    df["Wave0"] = False
+    df["Wave5"] = False
+
+    if df.empty or not {"RSI_14", "Low", "High", "Close"}.issubset(df.columns):
         return df
 
-    # Condition 1: RSI < 20
     rsi = df["RSI_14"]
     close = df["Close"]
 
+    # ---- Wave 0 conditions ----
     # Condition 1: RSI < 20 AND RSI increasing AND price increasing
     cond_rsi_price = (rsi < 20) & (rsi > rsi.shift(1)) & (close > close.shift(1))
 
@@ -109,18 +117,38 @@ def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
     eps = 1e-8
     cond_extreme_low = df["Low"] <= (rolling_min_low + eps)
 
-    # Final combined rule
     df.loc[cond_rsi_price | cond_extreme_low, "Wave0"] = True
+
+    # ---- Wave 5: highest High between two 0s ----
+    wave0_positions = np.where(df["Wave0"].values)[0]
+
+    # Need at least 2 zeros to define a 5 between them
+    if len(wave0_positions) >= 2:
+        for k in range(len(wave0_positions) - 1):
+            start_i = wave0_positions[k]
+            end_i = wave0_positions[k + 1]
+
+            # Segment is strictly "between" the two 0s → (start_i, end_i)
+            if end_i - start_i <= 1:
+                continue  # no candles between
+
+            seg = df.iloc[start_i + 1 : end_i]  # exclude both 0 candles
+            if seg.empty:
+                continue
+
+            idx_max_high = seg["High"].idxmax()
+            df.loc[idx_max_high, "Wave5"] = True
+
     return df
 
 
-# ---------------- CHART ----------------
+# ---------------- BIG CHART ----------------
 def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
     Bigger TradingView-style layout:
-    Row 1: Candlestick (larger) + SMA + Wave 0
-    Row 2: Volume (smaller)
-    Row 3: RSI (smaller)
+    Row 1: Candlestick (larger) + SMA + Wave 0 + Wave 5
+    Row 2: Volume
+    Row 3: RSI
     """
     if df is None or df.empty:
         return go.Figure()
@@ -131,7 +159,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
         rows=3,
         cols=1,
         shared_xaxes=True,
-        row_heights=[0.72, 0.15, 0.13],   # ⬅️ Bigger main chart
+        row_heights=[0.72, 0.15, 0.13],
         vertical_spacing=0.02,
         specs=[
             [{"type": "candlestick"}],
@@ -170,7 +198,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                 col=1,
             )
 
-    # --- Wave 0 label (bold) ---
+    # --- Wave 0 labels (bold below lows) ---
     if "Wave0" in df.columns:
         wave0_df = df[df["Wave0"]]
         if not wave0_df.empty:
@@ -182,6 +210,23 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     text=["<b>0</b>"] * len(wave0_df),
                     textposition="middle center",
                     name="Wave 0",
+                ),
+                row=1,
+                col=1,
+            )
+
+    # --- Wave 5 labels (bold above highs) ---
+    if "Wave5" in df.columns:
+        wave5_df = df[df["Wave5"]]
+        if not wave5_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=wave5_df.index,
+                    y=wave5_df["High"] * 1.005,
+                    mode="text",
+                    text=["<b>5</b>"] * len(wave5_df),
+                    textposition="middle center",
+                    name="Wave 5",
                 ),
                 row=1,
                 col=1,
@@ -226,7 +271,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
         title=title,
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
-        height=900,  # ⬅️ Increased chart height
+        height=900,
         margin=dict(l=10, r=10, t=40, b=10),
     )
 
@@ -236,21 +281,16 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     return fig
 
 
-
 # ---------------- SIDEBAR ----------------
 st.sidebar.header("⚙️ Settings")
 
 default_tickers = [
-   "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS",
-"BAJAJ-AUTO.NS", "BAJAJFINSV.NS", "BAJFINANCE.NS", "BHARTIARTL.NS", "BPCL.NS",
-"BRITANNIA.NS", "CIPLA.NS", "COALINDIA.NS", "DIVISLAB.NS", "DRREDDY.NS",
-"EICHERMOT.NS", "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", "HDFCLIFE.NS",
-"HEROMOTOCO.NS", "HINDALCO.NS", "HINDUNILVR.NS", "ICICIBANK.NS", "INDUSINDBK.NS",
-"INFY.NS", "ITC.NS", "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
-"MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS", "POWERGRID.NS", "RELIANCE.NS",
-"SBILIFE.NS", "SBIN.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS",
-"TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS",
-
+    "RELIANCE.NS",
+    "HDFCBANK.NS",
+    "TCS.NS",
+    "INFY.NS",
+    "ICICIBANK.NS",
+    "NIFTY.NS",
 ]
 
 ticker = st.sidebar.selectbox(
@@ -285,7 +325,7 @@ with tabs[0]:
     st.subheader(f"⏱ Hourly — last 60 days — {ticker}")
     df_h = load_data(ticker, period="60d", interval="1h")
     df_h = add_indicators(df_h)
-    df_h = add_wave0_label(df_h)
+    df_h = add_wave_labels(df_h)
 
     if df_h.empty:
         st.warning("No hourly data found for this symbol.")
@@ -298,7 +338,7 @@ with tabs[1]:
     st.subheader(f"📅 Daily — last 3 years — {ticker}")
     df_d = load_data(ticker, period="3y", interval="1d")
     df_d = add_indicators(df_d)
-    df_d = add_wave0_label(df_d)
+    df_d = add_wave_labels(df_d)
 
     if df_d.empty:
         st.warning("No daily data found for this symbol.")
@@ -311,7 +351,7 @@ with tabs[2]:
     st.subheader(f"📆 Weekly — last 10 years — {ticker}")
     df_w = load_data(ticker, period="10y", interval="1wk")
     df_w = add_indicators(df_w)
-    df_w = add_wave0_label(df_w)
+    df_w = add_wave_labels(df_w)
 
     if df_w.empty:
         st.warning("No weekly data found for this symbol.")
