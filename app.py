@@ -5,7 +5,7 @@ import numpy as np
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-# ------------- PAGE CONFIG -------------
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     page_title="TradingView Style Multi-Timeframe Dashboard",
     layout="wide",
@@ -14,7 +14,8 @@ st.set_page_config(
 st.title("📈 TradingView-Style Stock Dashboard")
 st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI")
 
-# ------------- HELPERS -------------
+
+# ---------------- HELPERS ----------------
 @st.cache_data(ttl=3600)
 def load_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
     """
@@ -29,36 +30,44 @@ def load_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
         auto_adjust=False,
         progress=False,
     )
-    if df.empty:
-        return df
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     df = df.dropna().copy()
     df.reset_index(inplace=True)
-    df.rename(columns={"index": "Date"}, inplace=True)
+
+    # Ensure datetime column is named 'Date'
+    if "Date" not in df.columns:
+        first_col = df.columns[0]
+        df.rename(columns={first_col: "Date"}, inplace=True)
+
     return df
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add SMA(20/50/200) + RSI(14)."""
-    if df.empty:
+    """Add SMA(20/50/200) + RSI(14) using pure pandas."""
+    if df is None or df.empty:
         return df
 
-    # Simple Moving Averages
-    for win in [20, 50, 200]:
-        df[f"SMA_{win}"] = df["Close"].rolling(window=win).mean()
+    # ---- Simple Moving Averages ----
+    if "Close" in df.columns:
+        for win in [20, 50, 200]:
+            df[f"SMA_{win}"] = df["Close"].rolling(window=win).mean()
 
-    # RSI(14)
-    window = 14
-    delta = df["Close"].diff()
+        # ---- RSI(14) ----
+        window = 14
+        delta = df["Close"].diff()
 
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
 
-    roll_up = pd.Series(gain).rolling(window=window).mean()
-    roll_down = pd.Series(loss).rolling(window=window).mean()
+        roll_up = gain.rolling(window=window, min_periods=window).mean()
+        roll_down = loss.rolling(window=window, min_periods=window).mean()
 
-    rs = roll_up / roll_down
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    df["RSI_14"] = rsi
+        rs = roll_up / roll_down
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        df["RSI_14"] = rsi
 
     return df
 
@@ -70,7 +79,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     Row 2: Volume bars
     Row 3: RSI(14)
     """
-    if df.empty:
+    if df is None or df.empty:
         return go.Figure()
 
     fig = make_subplots(
@@ -139,7 +148,6 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
             row=3,
             col=1,
         )
-        # Add RSI 30 / 70 bands
         fig.add_hrect(
             y0=30, y1=70,
             line_width=0,
@@ -161,7 +169,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     return fig
 
 
-# ------------- SIDEBAR -------------
+# ---------------- SIDEBAR ----------------
 st.sidebar.header("⚙️ Settings")
 
 default_tickers = [
@@ -190,14 +198,15 @@ if custom.strip():
 st.sidebar.write("---")
 st.sidebar.markdown(
     """
-    **Note:**  
-    - Data from Yahoo Finance  
-    - Only trading days/hours are returned  
-      (no Saturdays, Sundays, or exchange holidays)
-    """
+**Note:**  
+- Data from Yahoo Finance  
+- Only trading days/hours are returned  
+  (no Saturdays, Sundays, or exchange holidays)
+"""
 )
 
-# ------------- MAIN CONTENT -------------
+
+# ---------------- MAIN CONTENT ----------------
 tabs = st.tabs(["⏱ Hourly", "📅 Daily", "📆 Weekly"])
 
 # ---- HOURLY ----
