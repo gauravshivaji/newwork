@@ -40,16 +40,16 @@ def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
     """Download OHLC data for selected timeframe and flatten columns."""
     if timeframe == "Daily":
         interval = "1d"
-        period = "3y"
+        period = "3y"      # more history so SMA200 + RF works
     elif timeframe == "Weekly":
         interval = "1wk"
-        period = "10y"
+        period = "10y"     # more history for weekly
     elif timeframe == "Hourly":
         interval = "60m"
         period = "60d"
     else:
         interval = "1d"
-        period = "1y"
+        period = "3y"
 
     df = yf.download(
         ticker,
@@ -57,17 +57,16 @@ def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
         interval=interval,
         auto_adjust=True,
         progress=False,
-        group_by="column",  # <- important
+        group_by="column",
     )
 
     if df.empty:
         return df
 
-    # 🔥 If columns are MultiIndex (('Close','TCS.NS')), make them simple: 'Close'
+    # Flatten MultiIndex columns if present
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # Now pick only the standard OHLCV columns
     wanted_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     df = df[wanted_cols].copy()
 
@@ -79,24 +78,26 @@ def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
     return df
 
 
-
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add RSI + SMAs + distance features."""
     df = df.copy()
+    if "Close" not in df.columns:
+        return df
 
-    close = df["Close"]  # this is now guaranteed to be a Series
+    close = df["Close"]
 
+    # Core indicators
     df["rsi"] = ta.momentum.rsi(close=close, window=14)
     df["sma22"] = close.rolling(22).mean()
     df["sma50"] = close.rolling(50).mean()
     df["sma200"] = close.rolling(200).mean()
 
+    # Distance to SMAs (normalized)
     for w in [22, 50, 200]:
         sma_col = f"sma{w}"
         df[f"dist_sma{w}"] = (df["Close"] - df[sma_col]) / df[sma_col]
 
     return df
-
 
 
 def find_pivots(prices: np.ndarray, order: int = 5):
@@ -118,6 +119,10 @@ def add_elliott_labels(df: pd.DataFrame, order: int = 5) -> pd.DataFrame:
     last few pivots labelled 0,1,2,3,4,5,A,B,C
     """
     df = df.copy()
+    if "Close" not in df.columns:
+        df["elliott_wave"] = np.nan
+        return df
+
     prices = df["Close"].values
     pivots = find_pivots(prices, order=order)
     wave_names = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
@@ -136,6 +141,8 @@ def add_elliott_labels(df: pd.DataFrame, order: int = 5) -> pd.DataFrame:
 
 
 def last_elliott_label(df: pd.DataFrame):
+    if "elliott_wave" not in df.columns:
+        return None
     s = df["elliott_wave"].dropna()
     if s.empty:
         return None
@@ -144,6 +151,8 @@ def last_elliott_label(df: pd.DataFrame):
 
 def detect_bullish_rsi_divergence(df: pd.DataFrame, order: int = 5) -> bool:
     """Price makes lower low, RSI makes higher low."""
+    if "rsi" not in df.columns:
+        return False
     df = df.dropna(subset=["rsi"]).copy()
     if len(df) < order * 2 + 2:
         return False
@@ -191,29 +200,45 @@ def near_support(df: pd.DataFrame, tolerance: float = 0.03, order: int = 5) -> b
 
 def rule_based_buy(df: pd.DataFrame) -> int:
     """
-    Your rules for BUY:
-    - RSI near 30 (25–40)
+    Your rules for BUY (slightly relaxed):
+    - RSI near 30 (30–45)
     - Bullish RSI divergence present
-    - Price above SMA22, SMA50, SMA200 (good buy zone)
+    - Price above at least 2 of (SMA22, SMA50, SMA200)
     - Price near support
-    - Elliott wave in 0,2,4
+    - Elliott wave in 0,2,4 OR no label yet
     """
-    df = df.dropna(subset=["rsi", "sma22", "sma50", "sma200"]).copy()
+    needed_cols = ["rsi", "sma22", "sma50", "sma200"]
+    for c in needed_cols:
+        if c not in df.columns:
+            return 0
+
+    df = df.dropna(subset=needed_cols).copy()
     if df.empty:
         return 0
 
     last = df.iloc[-1]
     rsi = last["rsi"]
-    cond_rsi = 25 <= rsi <= 40
+
+    # RSI condition
+    cond_rsi = 30 <= rsi <= 45
+
+    # RSI divergence
     cond_div = detect_bullish_rsi_divergence(df)
-    cond_sma = (
-        last["Close"] >= last["sma22"]
-        and last["Close"] >= last["sma50"]
-        and last["Close"] >= last["sma200"]
-    )
+
+    # SMA condition: price above at least 2 of 3 SMAs
+    cond_smas = [
+        last["Close"] >= last["sma22"],
+        last["Close"] >= last["sma50"],
+        last["Close"] >= last["sma200"],
+    ]
+    cond_sma = sum(cond_smas) >= 2
+
+    # Support
     cond_support = near_support(df)
+
+    # Elliott condition
     ell = last_elliott_label(df)
-    cond_elliott = ell in ["0", "2", "4"]
+    cond_elliott = (ell is None) or (ell in ["0", "2", "4"])
 
     if cond_rsi and cond_div and cond_sma and cond_support and cond_elliott:
         return 1
@@ -223,6 +248,8 @@ def rule_based_buy(df: pd.DataFrame) -> int:
 def elliott_code_series(df: pd.DataFrame) -> pd.Series:
     """Convert Elliott labels to numeric code for ML."""
     mapping = {"0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "A": 6, "B": 7, "C": 8}
+    if "elliott_wave" not in df.columns:
+        return pd.Series(index=df.index, data=-1)
     return df["elliott_wave"].map(mapping).fillna(-1)
 
 
@@ -232,8 +259,13 @@ def train_rf_and_predict(df: pd.DataFrame):
     target = 1 if next 5 bars return > 2%
     Features: RSI + distance to SMAs + Elliott code
     """
-    df = df.dropna(subset=["rsi", "sma22", "sma50", "sma200"]).copy()
-    if len(df) < 80:
+    needed_cols = ["rsi", "sma22", "sma50", "sma200"]
+    for c in needed_cols:
+        if c not in df.columns:
+            return None
+
+    df = df.dropna(subset=needed_cols).copy()
+    if len(df) < 50:    # relaxed from 80
         return None
 
     df["fwd_return"] = df["Close"].shift(-5) / df["Close"] - 1
@@ -252,7 +284,7 @@ def train_rf_and_predict(df: pd.DataFrame):
 
     df = df.dropna(subset=feature_cols + ["target"])
 
-    if len(df) < 60 or df["target"].nunique() < 2:
+    if len(df) < 40 or df["target"].nunique() < 2:  # relaxed from 60
         return None
 
     X = df[feature_cols]
@@ -281,14 +313,15 @@ def train_rf_and_predict(df: pd.DataFrame):
 def combined_buy_signal(df: pd.DataFrame):
     """
     Final decision:
-    - Rule-based BUY must be 1
-    - RF prediction must be 1
+    - If RF available: BUY only if rules + RF both say bullish
+    - If RF not available: fallback to ONLY rules
     """
     rule_sig = rule_based_buy(df)
     rf_res = train_rf_and_predict(df)
 
     if rf_res is None:
-        return "No data"
+        # Fallback: only rules
+        return "Yes" if rule_sig == 1 else "No"
 
     rf_pred, rf_proba = rf_res
     final = (rule_sig == 1) and (rf_pred == 1)
@@ -296,6 +329,12 @@ def combined_buy_signal(df: pd.DataFrame):
 
 
 def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
+    needed_cols = ["Open", "High", "Low", "Close", "sma22", "sma50", "sma200", "rsi"]
+    for c in needed_cols:
+        if c not in df.columns:
+            st.warning("Not enough data to plot indicators.")
+            return
+
     df = df.dropna(subset=["sma22", "sma50", "sma200", "rsi"]).copy()
     if df.empty:
         st.warning("Not enough data to plot.")
@@ -340,20 +379,21 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
     )
 
     # Elliott labels on price
-    ell = df["elliott_wave"].dropna()
-    for ts, label in ell.items():
-        price = df.loc[ts, "Close"]
-        fig.add_annotation(
-            x=ts,
-            y=price,
-            text=label,
-            showarrow=True,
-            arrowhead=1,
-            ax=0,
-            ay=-20,
-            row=1,
-            col=1,
-        )
+    if "elliott_wave" in df.columns:
+        ell = df["elliott_wave"].dropna()
+        for ts, label in ell.items():
+            price = df.loc[ts, "Close"]
+            fig.add_annotation(
+                x=ts,
+                y=price,
+                text=label,
+                showarrow=True,
+                arrowhead=1,
+                ax=0,
+                ay=-20,
+                row=1,
+                col=1,
+            )
 
     # RSI panel
     fig.add_trace(
@@ -362,7 +402,7 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
         col=1,
     )
 
-    # (30,70) guide lines using shapes
+    # (30,70) guide lines
     fig.add_shape(
         type="line",
         x0=df.index[0],
@@ -453,7 +493,8 @@ st.subheader("📋 Multi-Timeframe Buy Table")
 
 if st.button("Run Scan"):
     rows = []
-    progress = st.progress(0, text="Scanning tickers...")
+    progress = st.progress(0.0)
+    status = st.empty()
 
     for i, tck in enumerate(tickers_to_scan, start=1):
         row = {"Stock Name": tck}
@@ -475,14 +516,17 @@ if st.button("Run Scan"):
             row[col_name] = decision
 
         rows.append(row)
-        progress.progress(i / len(tickers_to_scan), text=f"Scanning {tck}...")
+        progress.progress(i / len(tickers_to_scan))
+        status.text(f"Scanning {tck}... ({i}/{len(tickers_to_scan)})")
 
     progress.empty()
+    status.empty()
     result_df = pd.DataFrame(rows)
     st.dataframe(result_df, use_container_width=True)
     st.caption(
-        "✅ 'Yes' = RandomForest predicts upside AND all your buy rules are satisfied "
-        "(RSI near 30 + divergence + SMA zone + support + Elliott 0/2/4)."
+        "✅ 'Yes' = RandomForest predicts upside (if enough data) AND your buy rules "
+        "(RSI near 30 + divergence + SMA zone + support + Elliott 0/2/4/None) are satisfied. "
+        "If RF has no data, result is based only on rules."
     )
 else:
     st.info("Click **Run Scan** to build the multi-timeframe Buy table.")
