@@ -195,7 +195,6 @@ def check_impulse_correction_rules(prices, seq):
     Returns (valid: bool, score: float, trend: 'up'/'down')
     """
 
-    # Extract indices & prices
     idxs = [i for i, _ in seq]
     p = [prices[i] for i in idxs]
 
@@ -212,19 +211,14 @@ def check_impulse_correction_rules(prices, seq):
         p = [-x for x in p]  # invert so we treat it as uptrend
 
     # Now p is "bull" impulse in either case
-
-    # Name them for clarity
     W0, W1, W2, W3, W4, W5, W6, W7, W8 = p
-
     score = 0.0
 
     # ---- RULE 1: Wave 2 never retraces 100% of Wave 1 (W2 > W0) ----
     if W2 <= W0:
         return False, 0.0, None
     retr2 = (W1 - W2) / (W1 - W0 + 1e-9)
-    # allow around 0.3–0.9
     if 0.3 <= retr2 <= 0.9:
-        # closer to 0.5–0.8 is better
         score += score_fib(retr2, 0.618, tol=0.4)
     else:
         return False, 0.0, None
@@ -232,7 +226,6 @@ def check_impulse_correction_rules(prices, seq):
     # ---- RULE 4: Wave 3 must break Wave 1 high (W3 > W1) ----
     if W3 <= W1:
         return False, 0.0, None
-    # Wave 3 length vs Wave 1 & Wave 5
     len1 = W1 - W0
     len3 = W3 - W2
     len5 = W5 - W4
@@ -240,23 +233,19 @@ def check_impulse_correction_rules(prices, seq):
     # ---- RULE 2: Wave 3 never the shortest ----
     if len3 <= 0 or len3 <= min(len1, len5):
         return False, 0.0, None
-    # reward if approx 1.618 * len1
     r31 = fib_ratio(len3, len1)
     score += score_fib(r31, 1.618, tol=0.6)
 
     # ---- RULE 3: Wave 4 never enters Wave 1 territory (uptrend) ----
-    # W4 low must be above W1 high -> W4 > W1
     if W4 <= W1:
         return False, 0.0, None
-    # Wave 4 retrace 23.6–38.2% of Wave 3 (soft)
     retr4 = (W3 - W4) / (W3 - W2 + 1e-9)
     if 0.1 <= retr4 <= 0.6:
         score += score_fib(retr4, 0.382, tol=0.4)
 
     # ---- RULE 5: Wave 5 makes higher high than Wave 3 ----
-    if W5 < W3 * 0.98:  # allow small truncation chance
+    if W5 < W3 * 0.98:  # allow small truncation
         return False, 0.0, None
-    # reward if len5 ~ 0.618 of len1 or len3
     r51 = fib_ratio(len5, len1)
     r53 = fib_ratio(len5, len3)
     score += max(score_fib(r51, 0.618, tol=0.6),
@@ -264,15 +253,12 @@ def check_impulse_correction_rules(prices, seq):
 
     # ---- RULE 7: Wave A (W6) starts correction, breaks W4 area ----
     if W6 >= W4:
-        # must break below W4 in uptrend
         return False, 0.0, None
 
     # ---- RULE 8: Wave B (W7) cannot exceed Wave 5 (usually) ----
     if W7 > W5 * 1.02:
-        # small leeway, otherwise invalid
         return False, 0.0, None
 
-    # B retracement 38–78% of A (soft)
     retr_B = (W7 - W6) / (W5 - W6 + 1e-9)
     if 0.2 <= retr_B <= 0.9:
         score += score_fib(retr_B, 0.5, tol=0.5)
@@ -281,7 +267,6 @@ def check_impulse_correction_rules(prices, seq):
     if W8 >= W6:
         return False, 0.0, None
 
-    # C often = A or 1.618 × A
     lenA = W6 - W5
     lenC = W8 - W7
     rCA = fib_ratio(lenC, lenA)
@@ -290,7 +275,6 @@ def check_impulse_correction_rules(prices, seq):
         score_fib(rCA, 1.618, tol=0.6),
     )
 
-    # additional small rewards for general shape
     if W1 > W0 and W3 > W1 and W5 > W3:
         score += 0.5
 
@@ -330,7 +314,7 @@ def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
             continue
 
         idxs = [i for i, _ in window]
-        span = idxs[-1] - idxs[0]  # time span covered in bars
+        span = idxs[-1] - idxs[0]  # time span in bars
 
         labels_map = {}
         wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
@@ -343,7 +327,6 @@ def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
             best = candidate
         else:
             best_span, best_score, _, _ = best
-            # prefer larger span; if similar, prefer higher score
             if span > best_span * 1.05:
                 best = candidate
             elif abs(span - best_span) <= best_span * 0.05 and score > best_score:
@@ -355,12 +338,59 @@ def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
     return best[3]  # labels_map: bar_idx -> "0".."C"
 
 
+def fallback_elliott_cycle(prices: np.ndarray, timeframe: str):
+    """
+    Fallback when strict Elliott rules find no valid cycle.
+    - Uses pivots over entire timeframe
+    - Selects up to 9 pivots, evenly spread across time
+    - Labels them 0,1,2,3,4,5,A,B,C without strict EW validation
+    """
+    params = get_timeframe_params(timeframe)
+    order = params["order"]
+    min_pct = params["min_pct"]
+
+    raw_pivots = find_pivots(prices, order=order)
+    pivots = filter_pivots_min_move(prices, raw_pivots, min_pct=min_pct)
+
+    m = len(pivots)
+    if m < 2:
+        return {}
+
+    # If there are <= 9 pivots, just use them
+    if m <= 9:
+        selected = pivots
+    else:
+        # Evenly select 9 indices from 0..m-1
+        step = (m - 1) / (9 - 1)
+        idxs = [int(round(k * step)) for k in range(9)]
+        idxs = sorted(set(max(0, min(m - 1, i)) for i in idxs))
+
+        # Fill if < 9
+        while len(idxs) < min(9, m):
+            for j in range(m):
+                if j not in idxs:
+                    idxs.append(j)
+                    if len(idxs) == min(9, m):
+                        break
+        idxs = sorted(idxs)
+        selected = [pivots[j] for j in idxs]
+
+    labels_map = {}
+    wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
+    for k, (bar_idx, kind) in enumerate(selected):
+        if k >= len(wave_pattern):
+            break
+        labels_map[bar_idx] = wave_pattern[k]
+
+    return labels_map
+
+
 def add_elliott_labels(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """
     Wrapper used by the app:
-    - Uses detect_best_elliott_cycle
-    - Writes 'elliott_wave' column with 0..5,A,B,C for chosen pivots
-      and NaN elsewhere.
+    1) Try strict Elliott detection with your rules.
+    2) If nothing found, fall back to a simple 9-pivot cycle
+       spread across the whole timeframe.
     """
     df = df.copy()
     df["elliott_wave"] = np.nan
@@ -369,7 +399,13 @@ def add_elliott_labels(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         return df
 
     prices = df["Close"].values
+
+    # First: strict rulebook-based detection
     labels_map = detect_best_elliott_cycle(prices, timeframe)
+
+    # If nothing found, use fallback simple cycle
+    if not labels_map:
+        labels_map = fallback_elliott_cycle(prices, timeframe)
 
     if not labels_map:
         return df
@@ -579,7 +615,7 @@ def train_rf_and_predict(df: pd.DataFrame):
             return None
 
     df = df.dropna(subset=needed_cols).copy()
-    if len(df) < 50:    # relaxed
+    if len(df) < 50:
         return None
 
     df["fwd_return"] = df["Close"].shift(-5) / df["Close"] - 1
@@ -653,7 +689,6 @@ def combined_buy_signal(df: pd.DataFrame, timeframe: str, return_reason: bool = 
         lines.append(f"- Model bullish probability: `{rf_proba:.2f}`")
         lines.append(f"- Model class prediction: `{'Bullish' if rf_pred == 1 else 'Not Bullish'}`")
 
-        # Combine rules + ML
         if rf_pred == 1 and rule_sig == 1:
             final = "Yes"
             lines.append("- ✅ Both rules and model agree on bullish setup.")
@@ -675,7 +710,8 @@ def combined_buy_signal(df: pd.DataFrame, timeframe: str, return_reason: bool = 
         return final
 
 
-# ---------- PLOTTING (NO MORE dropna) ----------
+# ---------- PLOTTING (NO dropna, so Elliott labels survive) ----------
+st.write(df_focus["elliott_wave"].value_counts(dropna=False))
 
 def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
     needed_cols = ["Open", "High", "Low", "Close", "sma22", "sma50", "sma200", "rsi"]
@@ -726,7 +762,7 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
         col=1,
     )
 
-    # Elliott labels on price (single best cycle)
+    # Elliott labels on price
     if "elliott_wave" in df.columns:
         ell = df["elliott_wave"].dropna()
         for ts, label in ell.items():
@@ -822,6 +858,8 @@ with col1:
     if not df_focus.empty:
         df_focus = add_indicators(df_focus)
         df_focus = add_elliott_labels(df_focus, chart_timeframe)
+        # debug: see if labels exist
+        # st.write("Elliott counts:", df_focus["elliott_wave"].value_counts(dropna=False))
         plot_chart(df_focus, focus_ticker, chart_timeframe)
     else:
         st.warning("No data for this ticker / timeframe.")
