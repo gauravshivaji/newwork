@@ -2,275 +2,236 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import ta
+from plotly.subplots import make_subplots
 import plotly.graph_objects as go
-from datetime import date, timedelta
 
 # ------------- PAGE CONFIG -------------
 st.set_page_config(
-    page_title="Nifty 50 SMA & RSI Dashboard",
-    layout="wide"
+    page_title="TradingView Style Multi-Timeframe Dashboard",
+    layout="wide",
 )
 
-st.title("📊 Nifty 50 Stock Dashboard — SMA(20/50/200) + RSI")
-st.write(
-    "Nifty 50 dashboard showing **candlestick price + Close line** with "
-    "SMA 20/50/200 and RSI for:\n"
-    "- Weekly: last 10 years\n"
-    "- Daily: last 3 years\n"
-    "- Hourly: last 60 days"
-)
+st.title("📈 TradingView-Style Stock Dashboard")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI")
 
-# ------------- NIFTY 50 TICKERS -------------
-NIFTY50_TICKERS = {
-    "RELIANCE": "RELIANCE.NS",
-    "HDFC Bank": "HDFCBANK.NS",
-    "ICICI Bank": "ICICIBANK.NS",
-    "Infosys": "INFY.NS",
-    "TCS": "TCS.NS",
-    "Kotak Bank": "KOTAKBANK.NS",
-    "Axis Bank": "AXISBANK.NS",
-    "SBI": "SBIN.NS",
-    "Larsen & Toubro": "LT.NS",
-    "ITC": "ITC.NS",
-    "Bharti Airtel": "BHARTIARTL.NS",
-    "HCL Tech": "HCLTECH.NS",
-    "Wipro": "WIPRO.NS",
-    "Tech Mahindra": "TECHM.NS",
-    "Asian Paints": "ASIANPAINT.NS",
-    "HUL": "HINDUNILVR.NS",
-    "Maruti Suzuki": "MARUTI.NS",
-    "Mahindra & Mahindra": "M_M.NS",
-    "Tata Motors": "TATAMOTORS.NS",
-    "Tata Steel": "TATASTEEL.NS",
-    "JSW Steel": "JSWSTEEL.NS",
-    "Sun Pharma": "SUNPHARMA.NS",
-    "Bajaj Finance": "BAJFINANCE.NS",
-    "Bajaj Finserv": "BAJAJFINSV.NS",
-    "Adani Ports": "ADANIPORTS.NS",
-    "Adani Enterprises": "ADANIENT.NS",
-    "Power Grid": "POWERGRID.NS",
-    "ONGC": "ONGC.NS",
-    "NTPC": "NTPC.NS",
-    "Coal India": "COALINDIA.NS",
-    "Titan": "TITAN.NS",
-    "UltraTech Cement": "ULTRACEMCO.NS",
-    "Grasim": "GRASIM.NS",
-    "HDFC Life": "HDFCLIFE.NS",
-    "SBI Life": "SBILIFE.NS",
-    "Britannia": "BRITANNIA.NS",
-    "Cipla": "CIPLA.NS",
-    "Dr Reddy's": "DRREDDY.NS",
-    "Divi's Lab": "DIVISLAB.NS",
-    "Eicher Motors": "EICHERMOT.NS",
-    "Hero MotoCorp": "HEROMOTOCO.NS",
-    "Bajaj Auto": "BAJAJ_AUTO.NS",
-    "Tata Consumer": "TATACONSUM.NS",
-    "Nestle India": "NESTLEIND.NS",
-    "Apollo Hospitals": "APOLLOHOSP.NS",
-    "UPL": "UPL.NS",
-    "Shree Cement": "SHREECEM.NS",
-    "Hindalco": "HINDALCO.NS",
-    "JSW Energy": "JSWENERGY.NS"
-}
-
-# ------------- SIDEBAR CONTROLS -------------
-st.sidebar.header("⚙️ Settings")
-
-stock_name = st.sidebar.selectbox(
-    "Select Nifty 50 Stock",
-    options=list(NIFTY50_TICKERS.keys()),
-    index=0
-)
-
-ticker = NIFTY50_TICKERS[stock_name]
-
-st.sidebar.markdown("---")
-st.sidebar.write("Made with ❤️ using Streamlit & yfinance")
-
-# ------------- FIXED DATE RANGES -------------
-today = date.today()
-daily_start = today - timedelta(days=3 * 365)   # ~3 years
-weekly_start = today - timedelta(days=10 * 365) # ~10 years
-hourly_start = today - timedelta(days=60)       # 60 days
-
-# ------------- DATA DOWNLOAD FUNCTION -------------
-@st.cache_data(show_spinner=True)
-def load_data(ticker_symbol, start, end, interval="1d"):
+# ------------- HELPERS -------------
+@st.cache_data(ttl=3600)
+def load_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    """
+    Download OHLCV data from Yahoo Finance.
+    period: '60d', '3y', '10y' etc.
+    interval: '1h', '1d', '1wk'
+    """
     df = yf.download(
-        ticker_symbol,
-        start=start,
-        end=end + timedelta(days=1),
+        ticker,
+        period=period,
         interval=interval,
-        auto_adjust=False
+        auto_adjust=False,
+        progress=False,
     )
+    if df.empty:
+        return df
+    df = df.dropna().copy()
+    df.reset_index(inplace=True)
+    df.rename(columns={"index": "Date"}, inplace=True)
+    return df
 
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Add SMA(20/50/200) + RSI(14)."""
     if df.empty:
         return df
 
-    df = df.copy()
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
+    # Simple Moving Averages
+    for win in [20, 50, 200]:
+        df[f"SMA_{win}"] = df["Close"].rolling(window=win).mean()
 
-    # 🔹 Flatten MultiIndex
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+    # RSI(14)
+    window = 14
+    delta = df["Close"].diff()
 
-    # 🔹 Fix OHLC types
-    for col in ["Open", "High", "Low", "Close"]:
-        if col in df.columns:
-            series = df[col]
-            if isinstance(series, pd.DataFrame):
-                series = series.iloc[:, 0]
-            df[col] = pd.to_numeric(series, errors="coerce")
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
 
-    # 🔹 Remove invalid rows
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    roll_up = pd.Series(gain).rolling(window=window).mean()
+    roll_down = pd.Series(loss).rolling(window=window).mean()
 
-    # 🔥🔥 REMOVE SATURDAY + SUNDAY + NON-TRADING DAYS
-    df = df[df.index.dayofweek < 5]        # keep only Mon–Fri
+    rs = roll_up / roll_down
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    df["RSI_14"] = rsi
 
     return df
 
-# ------------- INDICATOR CALCULATION -------------
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
 
-    # --- SMA ---
-    df["SMA20"] = df["Close"].rolling(window=20).mean()
-    df["SMA50"] = df["Close"].rolling(window=50).mean()
-    df["SMA200"] = df["Close"].rolling(window=200).mean()
+def make_tv_style_chart(df: pd.DataFrame, title: str):
+    """
+    TradingView-style layout:
+    Row 1: Candlestick + SMA20/50/200
+    Row 2: Volume bars
+    Row 3: RSI(14)
+    """
+    if df.empty:
+        return go.Figure()
 
-    # --- RSI (ensure 1D close series) ---
-    close = df["Close"]
-    if isinstance(close, pd.DataFrame):
-        close = close.iloc[:, 0]
-
-    rsi_indicator = ta.momentum.RSIIndicator(close=close, window=14)
-    df["RSI"] = rsi_indicator.rsi()
-
-    return df
-
-# ------------- CHART FUNCTIONS -------------
-def plot_price_and_sma(df: pd.DataFrame, title_suffix: str):
-    fig_price = go.Figure()
-
-    # Candlestick price
-    fig_price.add_trace(go.Candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"],
-        name="Price (Candle)"
-    ))
-
-    # Close line
-    fig_price.add_trace(go.Scatter(
-        x=df.index,
-        y=df["Close"],
-        mode="lines",
-        name="Close (Line)",
-        line=dict(width=1)
-    ))
-
-    # SMAs
-    fig_price.add_trace(go.Scatter(
-        x=df.index,
-        y=df["SMA20"],
-        mode="lines",
-        name="SMA20"
-    ))
-    fig_price.add_trace(go.Scatter(
-        x=df.index,
-        y=df["SMA50"],
-        mode="lines",
-        name="SMA50"
-    ))
-    fig_price.add_trace(go.Scatter(
-        x=df.index,
-        y=df["SMA200"],
-        mode="lines",
-        name="SMA200"
-    ))
-
-    fig_price.update_layout(
-        title=f"{title_suffix} — Candlestick + SMA 20/50/200",
-        xaxis_title="Date",
-        yaxis_title="Price (₹)",
-        xaxis_rangeslider_visible=True,
-        height=600,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.6, 0.2, 0.2],
+        vertical_spacing=0.03,
+        specs=[[{"type": "candlestick"}],
+               [{"type": "bar"}],
+               [{"type": "scatter"}]],
     )
-    st.plotly_chart(fig_price, use_container_width=True)
 
-
-def plot_rsi(df: pd.DataFrame, title_suffix: str):
-    fig_rsi = go.Figure()
-    fig_rsi.add_trace(go.Scatter(
-        x=df.index,
-        y=df["RSI"],
-        mode="lines",
-        name="RSI"
-    ))
-
-    fig_rsi.add_hline(y=70, line_dash="dash", annotation_text="Overbought (70)")
-    fig_rsi.add_hline(y=30, line_dash="dash", annotation_text="Oversold (30)")
-
-    fig_rsi.update_layout(
-        title=f"{title_suffix} — RSI (14)",
-        xaxis_title="Date",
-        yaxis_title="RSI",
-        height=350,
+    # --- Candles ---
+    fig.add_trace(
+        go.Candlestick(
+            x=df["Date"],
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name="Price",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
     )
-    st.plotly_chart(fig_rsi, use_container_width=True)
 
-# ------------- MAIN -------------
-st.subheader(f"🧾 {stock_name} ({ticker}) — Fixed Timeframe View")
+    # --- SMAs ---
+    for win, name in zip([20, 50, 200], ["SMA 20", "SMA 50", "SMA 200"]):
+        col_name = f"SMA_{win}"
+        if col_name in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["Date"],
+                    y=df[col_name],
+                    mode="lines",
+                    name=name,
+                ),
+                row=1,
+                col=1,
+            )
 
-tab_daily, tab_hourly, tab_weekly = st.tabs(["📅 Daily (3Y)", "⏱ Hourly (60D)", "📆 Weekly (10Y)"])
+    # --- Volume ---
+    if "Volume" in df.columns:
+        fig.add_trace(
+            go.Bar(
+                x=df["Date"],
+                y=df["Volume"],
+                name="Volume",
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
 
-# ---- DAILY TAB (3 years) ----
-with tab_daily:
-    st.markdown("**Daily timeframe — last ~3 years**")
-    with st.spinner("Fetching Daily data..."):
-        df_daily = load_data(ticker, daily_start, today, "1d")
+    # --- RSI ---
+    if "RSI_14" in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df["Date"],
+                y=df["RSI_14"],
+                mode="lines",
+                name="RSI 14",
+            ),
+            row=3,
+            col=1,
+        )
+        # Add RSI 30 / 70 bands
+        fig.add_hrect(
+            y0=30, y1=70,
+            line_width=0,
+            fillcolor="LightGray",
+            opacity=0.2,
+            row=3, col=1,
+        )
 
-    if df_daily.empty:
-        st.warning("No daily data returned from Yahoo Finance.")
+    fig.update_xaxes(showspikes=True)
+    fig.update_yaxes(showspikes=True)
+
+    fig.update_layout(
+        title=title,
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+
+    return fig
+
+
+# ------------- SIDEBAR -------------
+st.sidebar.header("⚙️ Settings")
+
+default_tickers = [
+    "RELIANCE.NS",
+    "HDFCBANK.NS",
+    "TCS.NS",
+    "INFY.NS",
+    "ICICIBANK.NS",
+    "NIFTY.NS",
+]
+
+ticker = st.sidebar.selectbox(
+    "Select Symbol",
+    options=default_tickers,
+    index=0,
+)
+
+custom = st.sidebar.text_input(
+    "Or type custom symbol (Yahoo format, e.g. COFORGE.NS, AAPL, TSLA)",
+    value="",
+)
+
+if custom.strip():
+    ticker = custom.strip()
+
+st.sidebar.write("---")
+st.sidebar.markdown(
+    """
+    **Note:**  
+    - Data from Yahoo Finance  
+    - Only trading days/hours are returned  
+      (no Saturdays, Sundays, or exchange holidays)
+    """
+)
+
+# ------------- MAIN CONTENT -------------
+tabs = st.tabs(["⏱ Hourly", "📅 Daily", "📆 Weekly"])
+
+# ---- HOURLY ----
+with tabs[0]:
+    st.subheader(f"⏱ Hourly — last 60 days — {ticker}")
+    df_h = load_data(ticker, period="60d", interval="1h")
+    df_h = add_indicators(df_h)
+
+    if df_h.empty:
+        st.warning("No hourly data found for this symbol.")
     else:
-        df_daily = add_indicators(df_daily)
-        plot_price_and_sma(df_daily, f"{stock_name} — Daily (3Y)")
-        plot_rsi(df_daily, f"{stock_name} — Daily (3Y)")
-        with st.expander("📄 Show Daily data (last 200 rows)"):
-            st.dataframe(df_daily[["Close", "SMA20", "SMA50", "SMA200", "RSI"]].tail(200))
+        fig_h = make_tv_style_chart(df_h, f"{ticker} — Hourly (60D)")
+        st.plotly_chart(fig_h, use_container_width=True)
 
-# ---- HOURLY TAB (60 days) ----
-with tab_hourly:
-    st.markdown("**Hourly timeframe — last 60 days**")
-    with st.spinner("Fetching Hourly data..."):
-        df_hourly = load_data(ticker, hourly_start, today, "1h")
+# ---- DAILY ----
+with tabs[1]:
+    st.subheader(f"📅 Daily — last 3 years — {ticker}")
+    df_d = load_data(ticker, period="3y", interval="1d")
+    df_d = add_indicators(df_d)
 
-    if df_hourly.empty:
-        st.warning("No hourly data available (Yahoo limit or ticker restriction).")
+    if df_d.empty:
+        st.warning("No daily data found for this symbol.")
     else:
-        df_hourly = add_indicators(df_hourly)
-        plot_price_and_sma(df_hourly, f"{stock_name} — Hourly (60D)")
-        plot_rsi(df_hourly, f"{stock_name} — Hourly (60D)")
-        with st.expander("📄 Show Hourly data (last 300 rows)"):
-            st.dataframe(df_hourly[["Close", "SMA20", "SMA50", "SMA200", "RSI"]].tail(300))
+        fig_d = make_tv_style_chart(df_d, f"{ticker} — Daily (3Y)")
+        st.plotly_chart(fig_d, use_container_width=True)
 
-# ---- WEEKLY TAB (10 years) ----
-with tab_weekly:
-    st.markdown("**Weekly timeframe — last ~10 years**")
-    with st.spinner("Fetching Weekly data..."):
-        df_weekly = load_data(ticker, weekly_start, today, "1wk")
+# ---- WEEKLY ----
+with tabs[2]:
+    st.subheader(f"📆 Weekly — last 10 years — {ticker}")
+    df_w = load_data(ticker, period="10y", interval="1wk")
+    df_w = add_indicators(df_w)
 
-    if df_weekly.empty:
-        st.warning("No weekly data returned from Yahoo Finance.")
+    if df_w.empty:
+        st.warning("No weekly data found for this symbol.")
     else:
-        df_weekly = add_indicators(df_weekly)
-        plot_price_and_sma(df_weekly, f"{stock_name} — Weekly (10Y)")
-        plot_rsi(df_weekly, f"{stock_name} — Weekly (10Y)")
-        with st.expander("📄 Show Weekly data (all rows)"):
-            st.dataframe(df_weekly[["Close", "SMA20", "SMA50", "SMA200", "RSI"]])
+        fig_w = make_tv_style_chart(df_w, f"{ticker} — Weekly (10Y)")
+        st.plotly_chart(fig_w, use_container_width=True)
