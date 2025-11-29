@@ -115,27 +115,44 @@ def find_pivots(prices: np.ndarray, order: int = 5):
 
 def add_elliott_labels(df: pd.DataFrame, order: int = 5) -> pd.DataFrame:
     """
-    Very simplified Elliott-like wave:
-    last few pivots labelled 0,1,2,3,4,5,A,B,C
+    Heuristic Elliott-style labelling across the ENTIRE dataset.
+
+    - Uses all available data (so hourly = last 60 days, daily = last 3 years, weekly = last 10 years).
+    - Finds local pivots (swing highs/lows).
+    - Assigns labels in a repeating cycle:
+        0,1,2,3,4,5,A,B,C,0,1,2,3,4,5,A,B,C, ...
+
+    This means:
+    - If an Elliott-like cycle repeats twice, you'll see two full sequences.
+    - It is still an approximation, not strict Elliott rule validation.
     """
     df = df.copy()
-    if "Close" not in df.columns:
+
+    if "Close" not in df.columns or df.empty:
         df["elliott_wave"] = np.nan
         return df
 
     prices = df["Close"].values
-    pivots = find_pivots(prices, order=order)
-    wave_names = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
+    pivots = find_pivots(prices, order=order)  # [(index_position, 'low'/'high'), ...]
 
+    # Initialize column
     df["elliott_wave"] = np.nan
 
     if not pivots:
         return df
 
-    last_pivots = pivots[-len(wave_names):]
-    for idx, (i, kind) in enumerate(last_pivots):
-        label = wave_names[idx]
-        df.at[df.index[i], "elliott_wave"] = label
+    # Pattern to repeat across all pivots
+    wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
+    pattern_len = len(wave_pattern)
+
+    # Sort pivots by time index (just in case)
+    pivots = sorted(pivots, key=lambda x: x[0])
+
+    # Assign labels in a repeating cycle
+    for idx, (bar_idx, kind) in enumerate(pivots):
+        label = wave_pattern[idx % pattern_len]
+        if 0 <= bar_idx < len(df.index):
+            df.at[df.index[bar_idx], "elliott_wave"] = label
 
     return df
 
