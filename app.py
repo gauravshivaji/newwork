@@ -81,16 +81,27 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
     Wave 0:
-      - Condition 1 (RSI + price):
-          RSI < 20
-          AND RSI rising (rsi[i] > rsi[i-1])
-          AND Close rising (close[i] > close[i-1])
-      - OR Condition 2 (structural low):
-          Low is lowest in centered 201-bar window (100 back + 100 forward)
 
-      Wave0 = cond_rsi_price OR cond_extreme_low
+      Base logic:
+        Condition 1 (RSI + price):
+          - RSI < 20
+          - RSI rising (rsi[i] > rsi[i-1])
+          - Close rising (close[i] > close[i-1])
+
+        OR
+
+        Condition 2 (structural low):
+          - Low is lowest in centered 201-bar window (100 back + 100 forward)
+
+      NEW extra rule for 0:
+        - After 7 candles, price must be higher than at 0:
+              Close[i+7] > Close[i]
+
+      Final Wave0:
+        Wave0 = base_zero AND future_7_higher
 
     Wave 5:
+
       - Take all Wave0 positions
       - For each pair of consecutive 0s:
           look between them (exclusive of second 0)
@@ -102,37 +113,50 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     df["Wave0"] = False
     df["Wave5"] = False
 
-    if df.empty or not {"RSI_14", "Low", "High", "Close"}.issubset(df.columns):
+    needed_cols = {"RSI_14", "Low", "High", "Close"}
+    if df.empty or not needed_cols.issubset(df.columns):
         return df
 
     rsi = df["RSI_14"]
     close = df["Close"]
 
-    # ---- Wave 0 conditions ----
-    # Condition 1: RSI < 20 AND RSI increasing AND price increasing
+    # ---- Wave 0 base conditions ----
+
+    # Condition 1: RSI < 20 AND RSI increasing AND price increasing (on that candle)
     cond_rsi_price = (rsi < 20) & (rsi > rsi.shift(1)) & (close > close.shift(1))
 
     # Condition 2: Extreme 100-bar low (centered 201 bars)
-    rolling_min_low = df["Low"].rolling(window=101, center=True, min_periods=1).min()
+    rolling_min_low = df["Low"].rolling(window=201, center=True, min_periods=1).min()
     eps = 1e-8
     cond_extreme_low = df["Low"] <= (rolling_min_low + eps)
 
-    df.loc[cond_rsi_price | cond_extreme_low, "Wave0"] = True
+    base_zero = cond_rsi_price | cond_extreme_low
+
+    # ---- NEW: after 7 candles, price should be greater than at 0 ----
+    n = len(df)
+    future_7_higher = np.zeros(n, dtype=bool)
+
+    # Only valid if we have at least 7 candles ahead
+    for i in range(n - 7):
+        if close.iloc[i + 7] > close.iloc[i]:
+            future_7_higher[i] = True
+
+    # Final Wave0 mask
+    df["Wave0"] = base_zero & future_7_higher
 
     # ---- Wave 5: highest High between two 0s ----
     wave0_positions = np.where(df["Wave0"].values)[0]
 
-    # Need at least 2 zeros to define a 5 between them
     if len(wave0_positions) >= 2:
         for k in range(len(wave0_positions) - 1):
             start_i = wave0_positions[k]
             end_i = wave0_positions[k + 1]
 
-            # Segment is strictly "between" the two 0s → (start_i, end_i)
+            # Segment is strictly between the two 0s → (start_i, end_i)
             if end_i - start_i <= 1:
-                continue  # no candles between
+                continue
 
-            seg = df.iloc[start_i + 1 : end_i]  # exclude both 0 candles
+            seg = df.iloc[start_i + 1 : end_i]
             if seg.empty:
                 continue
 
