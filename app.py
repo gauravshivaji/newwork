@@ -197,52 +197,106 @@ def near_support(df: pd.DataFrame, tolerance: float = 0.03, order: int = 5) -> b
     current_price = closes[-1]
     return abs(current_price - support_price) / current_price <= tolerance
 
-
-def rule_based_buy(df: pd.DataFrame) -> int:
+def hourly_rules(df):
     """
-    Your rules for BUY (slightly relaxed):
-    - RSI near 30 (30–45)
-    - Bullish RSI divergence present
-    - Price above at least 2 of (SMA22, SMA50, SMA200)
-    - Price near support
-    - Elliott wave in 0,2,4 OR no label yet
+    Short-Term Trading (Hourly)
+    Requirements:
+    - RSI 25–40
+    - Price above SMA22 OR SMA50 (fast trend)
+    - Support tight: within 3%
+    - Elliott wave: 0 or 2 preferred
     """
-    needed_cols = ["rsi", "sma22", "sma50", "sma200"]
-    for c in needed_cols:
-        if c not in df.columns:
-            return 0
-
-    df = df.dropna(subset=needed_cols).copy()
+    df = df.dropna(subset=["rsi", "sma22", "sma50"]).copy()
     if df.empty:
         return 0
-
+    
     last = df.iloc[-1]
     rsi = last["rsi"]
 
-    # RSI condition
-    cond_rsi = 30 <= rsi <= 45
+    cond_rsi = 25 <= rsi <= 40
+    cond_sma = (last["Close"] >= last["sma22"]) or (last["Close"] >= last["sma50"])
+    cond_support = near_support(df, tolerance=0.03)
+    ell = last_elliott_label(df)
+    cond_ell = (ell in ["0", "2", None])
 
-    # RSI divergence
+    flags = [cond_rsi, cond_sma, cond_support, cond_ell]
+    score = sum(flags)
+    return 1 if score >= 2 else 0   # short-term needs only 2/4 conditions
+    
+
+
+def daily_rules(df):
+    """
+    Swing Trading (Daily)
+    Requirements:
+    - RSI 30–50
+    - At least 2 of SMA22, SMA50, SMA200
+    - Support within 5%
+    - Elliott: 0,2,4
+    - Divergence preferred
+    """
+    df = df.dropna(subset=["rsi","sma22","sma50","sma200"]).copy()
+    if df.empty:
+        return 0
+    
+    last = df.iloc[-1]
+    rsi = last["rsi"]
+
+    cond_rsi = 30 <= rsi <= 50
+    cond_sma = (
+        (last["Close"] >= last["sma22"]).astype(int) +
+        (last["Close"] >= last["sma50"]).astype(int) +
+        (last["Close"] >= last["sma200"]).astype(int)
+    ) >= 2
+
+    cond_support = near_support(df, tolerance=0.05)
+    ell = last_elliott_label(df)
+    cond_ell = ell in ["0", "2", "4"]
+
     cond_div = detect_bullish_rsi_divergence(df)
 
-    # SMA condition: price above at least 2 of 3 SMAs
-    cond_smas = [
-        last["Close"] >= last["sma22"],
-        last["Close"] >= last["sma50"],
-        last["Close"] >= last["sma200"],
-    ]
-    cond_sma = sum(cond_smas) >= 2
+    flags = [cond_rsi, cond_sma, cond_support, cond_ell, cond_div]
+    score = sum(flags)
+    return 1 if score >= 3 else 0   # swing needs 3/5
+    
 
-    # Support
-    cond_support = near_support(df)
 
-    # Elliott condition
+def weekly_rules(df):
+    """
+    Long-Term Position Trading (Weekly)
+    Requirements:
+    - RSI 35–55
+    - MUST be above SMA200 (long-term bull trend)
+    - Support within 10%
+    - Elliott only 2 or 4 (major correction wave)
+    """
+    df = df.dropna(subset=["rsi","sma200"]).copy()
+    if df.empty:
+        return 0
+    
+    last = df.iloc[-1]
+    rsi = last["rsi"]
+
+    cond_rsi = 35 <= rsi <= 55
+    cond_sma200 = last["Close"] >= last["sma200"]
+    cond_support = near_support(df, tolerance=0.10)
+    
     ell = last_elliott_label(df)
-    cond_elliott = (ell is None) or (ell in ["0", "2", "4"])
+    cond_ell = ell in ["2", "4"]
 
-    if cond_rsi and cond_div and cond_sma and cond_support and cond_elliott:
-        return 1
+    flags = [cond_rsi, cond_sma200, cond_support, cond_ell]
+    score = sum(flags)
+    return 1 if score >= 2 else 0   # long-term needs 2/4
+
+def rule_based_buy(df, timeframe):
+    if timeframe == "Hourly":
+        return hourly_rules(df)
+    elif timeframe == "Daily":
+        return daily_rules(df)
+    elif timeframe == "Weekly":
+        return weekly_rules(df)
     return 0
+
 
 
 def elliott_code_series(df: pd.DataFrame) -> pd.Series:
@@ -310,22 +364,26 @@ def train_rf_and_predict(df: pd.DataFrame):
     return pred_cls, proba
 
 
-def combined_buy_signal(df: pd.DataFrame):
-    """
-    Final decision:
-    - If RF available: BUY only if rules + RF both say bullish
-    - If RF not available: fallback to ONLY rules
-    """
-    rule_sig = rule_based_buy(df)
+def combined_buy_signal(df, timeframe):
+    rule_sig = rule_based_buy(df, timeframe)
     rf_res = train_rf_and_predict(df)
 
+    # No RF available → use rules only
     if rf_res is None:
-        # Fallback: only rules
         return "Yes" if rule_sig == 1 else "No"
 
     rf_pred, rf_proba = rf_res
-    final = (rule_sig == 1) and (rf_pred == 1)
-    return "Yes" if final else "No"
+
+    # Buy if RF is bullish AND rules say good
+    if rf_pred == 1 and rule_sig == 1:
+        return "Yes"
+    
+    # Helper condition: medium rules + high RF confidence
+    if rf_pred == 1 and rf_proba > 0.65 and rule_sig == 0:
+        return "Yes"
+
+    return "No"
+
 
 
 def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
@@ -480,7 +538,8 @@ with col2:
     st.subheader("Current signal (selected ticker)")
     if not df_focus.empty:
         df_for_sig = add_elliott_labels(add_indicators(df_focus))
-        signal = combined_buy_signal(df_for_sig)
+        signal = combined_buy_signal(df_for_sig, chart_timeframe)
+
         st.metric(
             label=f"Buy signal ({chart_timeframe})",
             value=signal,
@@ -512,7 +571,8 @@ if st.button("Run Scan"):
 
             df_tf = add_indicators(df_tf)
             df_tf = add_elliott_labels(df_tf)
-            decision = combined_buy_signal(df_tf)
+            decision = combined_buy_signal(df_tf, tf)
+
             row[col_name] = decision
 
         rows.append(row)
