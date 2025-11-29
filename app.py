@@ -14,8 +14,8 @@ st.set_page_config(
 
 st.title("📊 Nifty 50 Stock Dashboard — SMA(20/50/200) + RSI")
 st.write(
-    "Nifty 50 dashboard showing candlestick price with SMA 20/50/200 and RSI "
-    "for three fixed timeframes:\n"
+    "Nifty 50 dashboard showing **candlestick price + Close line** with "
+    "SMA 20/50/200 and RSI for:\n"
     "- Weekly: last 10 years\n"
     "- Daily: last 3 years\n"
     "- Hourly: last 60 days"
@@ -71,7 +71,7 @@ NIFTY50_TICKERS = {
     "UPL": "UPL.NS",
     "Shree Cement": "SHREECEM.NS",
     "Hindalco": "HINDALCO.NS",
-    "JSW Energy": "JSWENERGY.NS"  # can replace if needed
+    "JSW Energy": "JSWENERGY.NS"
 }
 
 # ------------- SIDEBAR CONTROLS -------------
@@ -88,7 +88,7 @@ ticker = NIFTY50_TICKERS[stock_name]
 st.sidebar.markdown("---")
 st.sidebar.write("Made with ❤️ using Streamlit & yfinance")
 
-# ------------- DATE RANGES (FIXED) -------------
+# ------------- FIXED DATE RANGES -------------
 today = date.today()
 daily_start = today - timedelta(days=3 * 365)   # ~3 years
 weekly_start = today - timedelta(days=10 * 365) # ~10 years
@@ -103,13 +103,22 @@ def load_data(ticker_symbol, start, end, interval="1d"):
         start=start,
         end=end + timedelta(days=1),  # include end date
         interval=interval,
-        auto_adjust=True
+        auto_adjust=False
     )
-    df = df.copy()
+
     if df.empty:
         return df
+
+    df = df.copy()
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
+
+    # Ensure numeric OHLC so candlestick works
+    for col in ["Open", "High", "Low", "Close"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
     return df
 
 # ------------- INDICATOR CALCULATION -------------
@@ -142,7 +151,16 @@ def plot_price_and_sma(df: pd.DataFrame, title_suffix: str):
         high=df["High"],
         low=df["Low"],
         close=df["Close"],
-        name="Price"
+        name="Price (Candle)"
+    ))
+
+    # Close line (extra clear)
+    fig_price.add_trace(go.Scatter(
+        x=df.index,
+        y=df["Close"],
+        mode="lines",
+        name="Close (Line)",
+        line=dict(width=1)
     ))
 
     # SMAs
@@ -166,10 +184,10 @@ def plot_price_and_sma(df: pd.DataFrame, title_suffix: str):
     ))
 
     fig_price.update_layout(
-        title=f"{title_suffix} — Candlestick with SMA 20/50/200",
+        title=f"{title_suffix} — Candlestick + SMA 20/50/200",
         xaxis_title="Date",
         yaxis_title="Price (₹)",
-        xaxis_rangeslider_visible=False,
+        xaxis_rangeslider_visible=True,
         height=600,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
