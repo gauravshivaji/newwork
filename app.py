@@ -12,10 +12,10 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Elliott (1-5, A, B, C)")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Elliott (Rules-Based)")
 
 
-# ---------------- HELPERS ----------------
+# ---------------- DATA LOADER ----------------
 @st.cache_data(ttl=3600)
 def load_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
     """
@@ -34,8 +34,7 @@ def load_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # If columns are MultiIndex (happens with some yfinance versions),
-    # keep only the first level: Open, High, Low, Close, Volume, etc.
+    # Flatten MultiIndex columns if present
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
@@ -48,8 +47,10 @@ def load_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
     return df
 
 
+# ---------------- INDICATORS ----------------
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add SMA(20/50/200) + RSI(14) using pure pandas."""
+    df = df.copy()
     if df is None or df.empty:
         return df
 
@@ -77,62 +78,158 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataFrame:
+# ---------------- ELLIOTT RULE ENGINE ----------------
+def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5, tol: float = 1e-8) -> pd.DataFrame:
     """
-    Very simple Elliott-like labelling:
-    1. Detect swing highs/lows using local window.
-    2. Take the last 8 pivots.
-    3. Label them as 1,2,3,4,5,A,B,C in order.
+    Elliott wave labelling with core rules:
 
-    This is heuristic & educational, not a full Elliott engine.
+    - Detect pivots (swing highs/lows) using rolling window.
+    - Search consecutive 6 pivots for an UP impulse: 0-1-2-3-4-5 with pattern L-H-L-H-L-H.
+    - Enforce rules:
+
+      Rule 1  — Wave 2 never breaks Wave 1 start:
+                 low2 > low0
+      Rule 2  — Wave 3 is never the shortest (vs 1 and 5).
+      Rule 3  — Wave 4 never overlaps Wave 1:
+                 low4 > high1
+      Rule 4  — Wave 3 must break Wave 1 high:
+                 high3 > high1
+      Rule 5  — Wave 5 must make new high above Wave 3:
+                 high5 >= high3
+      Rule 13 — Higher highs / higher lows:
+                 high1 < high3 < high5 and low0 < low2 < low4
+
+    - After a valid 1–5, try to attach A-B-C correction:
+      * Pattern of next pivots: L-H-L (A,B,C)
+      * Rule 8  — C breaks A:
+                   low_C < low_A
+      * Rule 9  — B length not > 2× A length (approx):
+
+    Returns df with:
+      - Elliott_Label: {1,2,3,4,5,A,B,C}
+      - Elliott_Pivot_Type: "H" or "L"
     """
-    if df is None or df.empty:
-        return df
-
-    if not {"High", "Low", "Close"}.issubset(df.columns):
-        return df
-
-    w = max(3, pivot_window)  # at least 3, must be odd for "center"
-    if w % 2 == 0:
-        w += 1  # make it odd
-
-    # Local highest high / lowest low in rolling window
-    df["HH"] = df["High"].rolling(w, center=True).max()
-    df["LL"] = df["Low"].rolling(w, center=True).min()
-
-    df["pivot_high"] = (df["High"] == df["HH"])
-    df["pivot_low"] = (df["Low"] == df["LL"])
-
-    pivots = df[(df["pivot_high"] | df["pivot_low"])].copy()
-
-    # Need at least some pivots to label
-    if len(pivots) < 5:
-        df["Elliott_Label"] = np.nan
-        df["Elliott_Pivot_Type"] = np.nan
-        return df
-
-    # Take last up-to-8 pivots
-    labels_full = ["1", "2", "3", "4", "5", "A", "B", "C"]
-    n = min(len(labels_full), len(pivots))
-    pivots = pivots.iloc[-n:]
-    labels = labels_full[-n:]  # align to last n points
-
+    df = df.copy()
+    needed_cols = {"High", "Low", "Close"}
     df["Elliott_Label"] = np.nan
     df["Elliott_Pivot_Type"] = np.nan
 
-    for (idx, row), label in zip(pivots.iterrows(), labels):
-        df.at[idx, "Elliott_Label"] = label
-        if row["pivot_high"]:
-            df.at[idx, "Elliott_Pivot_Type"] = "H"
-        elif row["pivot_low"]:
-            df.at[idx, "Elliott_Pivot_Type"] = "L"
+    if df is None or df.empty or not needed_cols.issubset(df.columns):
+        return df
 
-    # You can drop helper cols if you want less clutter, but they don't hurt
-    # df.drop(columns=["HH", "LL", "pivot_high", "pivot_low"], inplace=True)
+    # --- Detect pivots using rolling HH/LL ---
+    w = max(3, pivot_window)
+    if w % 2 == 0:
+        w += 1  # make window odd so center pivot is well-defined
+
+    df["HH"] = df["High"].rolling(w, center=True).max()
+    df["LL"] = df["Low"].rolling(w, center=True).min()
+    df["pivot_high"] = (df["High"] == df["HH"])
+    df["pivot_low"] = (df["Low"] == df["LL"])
+
+    pivots = []
+    for idx, row in df.iterrows():
+        if row["pivot_high"]:
+            pivots.append({"idx": idx, "type": "H", "price": row["High"]})
+        elif row["pivot_low"]:
+            pivots.append({"idx": idx, "type": "L", "price": row["Low"]})
+
+    if len(pivots) < 6:
+        return df
+
+    best_seq = None
+    best_start = None
+
+    # --- Search for valid impulse up (1–5) among consecutive 6 pivots ---
+    for j in range(len(pivots) - 5):
+        seq = pivots[j:j + 6]
+        types = [p["type"] for p in seq]
+
+        # Trend requirement + structural: L-H-L-H-L-H = uptrend impulse
+        if types != ["L", "H", "L", "H", "L", "H"]:
+            continue
+
+        w0, w1, w2, w3, w4, w5 = seq
+        l0, l2, l4 = w0["price"], w2["price"], w4["price"]
+        h1, h3, h5 = w1["price"], w3["price"], w5["price"]
+
+        # Rule 1 — Wave 2 never retraces 100% of Wave 1
+        # (Wave 2 low must stay above Wave 0 low)
+        if not (l2 > l0):
+            continue
+
+        # Rule 3 — Wave 4 never enters Wave 1 territory
+        # (Wave 4 low > Wave 1 high in strong uptrend)
+        if not (l4 > h1):
+            continue
+
+        # Rule 4 — Wave 3 must go beyond Wave 1 high
+        if not (h3 > h1):
+            continue
+
+        # Rule 5 — Wave 5 must make new high above Wave 3
+        if not (h5 >= h3):
+            continue
+
+        # Rule 13 — higher highs / higher lows
+        if not (h1 < h3 < h5 and l0 < l2 < l4):
+            continue
+
+        # Rule 2 — Wave 3 is never the shortest vs 1 and 5
+        len1 = h1 - l0
+        len3 = h3 - l2
+        len5 = h5 - l4
+        min_others = min(len1, len5)
+        if not (len3 + tol >= min_others):
+            continue
+
+        # If everything passes, keep this as latest valid impulse
+        best_seq = seq
+        best_start = j
+
+    if not best_seq:
+        return df  # no valid impulse pattern found
+
+    # --- Assign impulse labels 1–5 (we skip Wave 0) ---
+    labels_map = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
+    for i_wave, p in enumerate(best_seq):
+        if i_wave == 0:
+            continue  # Wave 0 is the starting pivot, not labelled
+        lbl = labels_map.get(i_wave)
+        if lbl is None:
+            continue
+        idx = p["idx"]
+        df.loc[idx, "Elliott_Label"] = lbl
+        df.loc[idx, "Elliott_Pivot_Type"] = p["type"]
+
+    # --- Try to attach ABC correction after wave 5 ---
+    if best_start is not None and best_start + 6 < len(pivots):
+        tail = pivots[best_start + 6 :]
+        if len(tail) >= 3:
+            A, B, C = tail[0], tail[1], tail[2]
+            tA, tB, tC = A["type"], B["type"], C["type"]
+
+            # For uptrend correction:
+            # Wave A: down leg -> L after 5
+            # Wave B: bounce -> H
+            # Wave C: final down -> L
+            if [tA, tB, tC] == ["L", "H", "L"]:
+                # Rule 8 — Wave C must break Wave A:
+                if C["price"] < A["price"]:
+                    # Rule 9 — Wave B cannot exceed 2× length of Wave A (approx)
+                    w5 = best_seq[5]
+                    lenA = w5["price"] - A["price"]
+                    lenB = B["price"] - A["price"]
+                    if lenA > 0 and lenB <= 2 * lenA + tol:
+                        for lbl, pivot in zip(["A", "B", "C"], [A, B, C]):
+                            idx = pivot["idx"]
+                            df.loc[idx, "Elliott_Label"] = lbl
+                            df.loc[idx, "Elliott_Pivot_Type"] = pivot["type"]
 
     return df
 
 
+# ---------------- CHART ----------------
 def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
     TradingView-style layout:
@@ -143,8 +240,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     if df is None or df.empty:
         return go.Figure()
 
-    # x-axis will be the index (DatetimeIndex)
-    x = df.index
+    x = df.index  # DatetimeIndex
 
     fig = make_subplots(
         rows=3,
@@ -152,9 +248,11 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
         shared_xaxes=True,
         row_heights=[0.6, 0.2, 0.2],
         vertical_spacing=0.03,
-        specs=[[{"type": "candlestick"}],
-               [{"type": "bar"}],
-               [{"type": "scatter"}]],
+        specs=[
+            [{"type": "candlestick"}],
+            [{"type": "bar"}],
+            [{"type": "scatter"}],
+        ],
     )
 
     # --- Candles ---
@@ -194,11 +292,9 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
             ys = []
             for idx, row in label_df.iterrows():
                 if "Elliott_Pivot_Type" in row and row["Elliott_Pivot_Type"] == "L":
-                    # place slightly below the low
-                    ys.append(row["Low"] * 0.995)
+                    ys.append(row["Low"] * 0.995)   # below lows
                 else:
-                    # place slightly above the high
-                    ys.append(row["High"] * 1.005)
+                    ys.append(row["High"] * 1.005)  # above highs
 
             fig.add_trace(
                 go.Scatter(
@@ -239,11 +335,13 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
             col=1,
         )
         fig.add_hrect(
-            y0=30, y1=70,
+            y0=30,
+            y1=70,
             line_width=0,
             fillcolor="LightGray",
             opacity=0.2,
-            row=3, col=1,
+            row=3,
+            col=1,
         )
 
     fig.update_xaxes(showspikes=True)
