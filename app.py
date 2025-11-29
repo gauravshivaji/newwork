@@ -711,7 +711,7 @@ def combined_buy_signal(df: pd.DataFrame, timeframe: str, return_reason: bool = 
 
 
 # ---------- PLOTTING (NO dropna, so Elliott labels survive) ----------
-st.write(df_focus["elliott_wave"].value_counts(dropna=False))
+
 
 def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
     needed_cols = ["Open", "High", "Low", "Close", "sma22", "sma50", "sma200", "rsi"]
