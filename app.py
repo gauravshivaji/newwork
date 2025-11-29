@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (Uptrend Thumb Rule)")
 
 
 # ---------------- DATA LOADER ----------------
@@ -77,11 +77,66 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ---------------- WAVE 0 DETECTION (UPTREND THUMB RULE) ----------------
+def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Wave 0 (Uptrend) Thumb Rule:
+
+    Wave 0 = LAST pivot low where:
+      - It's a swing low (pivot low):
+            Low[i] < Low[i-1] and Low[i] < Low[i+1]
+      - RSI_14[i] < 30   (oversold / exhaustion)
+      - There exists a future bar j > i with High[j] > High[i] (Higher High)
+
+    Only the LAST such pivot is marked as Wave 0 to avoid clutter.
+    """
+    df = df.copy()
+    df["Wave0"] = False
+
+    if df.empty or "Low" not in df.columns or "High" not in df.columns or "RSI_14" not in df.columns:
+        return df
+
+    lows = df["Low"].values
+    highs = df["High"].values
+    rsi = df["RSI_14"].values
+    n = len(df)
+
+    last_idx = None
+
+    # Start from bar 1 to n-2 to safely look at i-1 and i+1
+    for i in range(1, n - 1):
+        # Pivot low condition (swing low)
+        if not (lows[i] < lows[i - 1] and lows[i] < lows[i + 1]):
+            continue
+
+        # RSI oversold
+        if np.isnan(rsi[i]) or rsi[i] >= 30:
+            continue
+
+        # Check for future Higher High
+        if i + 1 >= n:
+            continue
+        future_max_high = np.nanmax(highs[i + 1 :])
+        if np.isnan(future_max_high):
+            continue
+        if future_max_high <= highs[i]:
+            continue
+
+        # If all conditions satisfied, remember this as a candidate
+        last_idx = i
+
+    # Mark only the last valid Wave 0 pivot
+    if last_idx is not None:
+        df.iloc[last_idx, df.columns.get_loc("Wave0")] = True
+
+    return df
+
+
 # ---------------- CHART ----------------
 def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
     TradingView-style layout:
-    Row 1: Candlestick + SMA20/50/200
+    Row 1: Candlestick + SMA20/50/200 + Wave 0 label (if any)
     Row 2: Volume bars
     Row 3: RSI(14)
     """
@@ -128,6 +183,23 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     y=df[col_name],
                     mode="lines",
                     name=name,
+                ),
+                row=1,
+                col=1,
+            )
+
+    # --- Wave 0 label (if any) ---
+    if "Wave0" in df.columns:
+        wave0_df = df[df["Wave0"]]
+        if not wave0_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=wave0_df.index,
+                    y=wave0_df["Low"] * 0.995,  # slightly below the low
+                    mode="text",
+                    text=["0"] * len(wave0_df),
+                    textposition="middle center",
+                    name="Wave 0",
                 ),
                 row=1,
                 col=1,
@@ -225,6 +297,7 @@ with tabs[0]:
     st.subheader(f"⏱ Hourly — last 60 days — {ticker}")
     df_h = load_data(ticker, period="60d", interval="1h")
     df_h = add_indicators(df_h)
+    df_h = add_wave0_label(df_h)
 
     if df_h.empty:
         st.warning("No hourly data found for this symbol.")
@@ -237,6 +310,7 @@ with tabs[1]:
     st.subheader(f"📅 Daily — last 3 years — {ticker}")
     df_d = load_data(ticker, period="3y", interval="1d")
     df_d = add_indicators(df_d)
+    df_d = add_wave0_label(df_d)
 
     if df_d.empty:
         st.warning("No daily data found for this symbol.")
@@ -249,6 +323,7 @@ with tabs[2]:
     st.subheader(f"📆 Weekly — last 10 years — {ticker}")
     df_w = load_data(ticker, period="10y", interval="1wk")
     df_w = add_indicators(df_w)
+    df_w = add_wave0_label(df_w)
 
     if df_w.empty:
         st.warning("No weekly data found for this symbol.")
