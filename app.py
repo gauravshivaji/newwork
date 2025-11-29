@@ -13,14 +13,12 @@ st.set_page_config(
 )
 
 st.title("📊 Nifty 50 Stock Dashboard — SMA(20/50/200) + RSI")
-
 st.write(
     "Interactive dashboard for Nifty 50 stocks showing price with "
-    "SMA 20/50/200 and RSI indicator."
+    "SMA 20/50/200 and RSI indicator across **Hourly / Daily / Weekly** timeframes."
 )
 
 # ------------- NIFTY 50 TICKERS -------------
-# You can edit/update this list anytime if constituents change
 NIFTY50_TICKERS = {
     "RELIANCE": "RELIANCE.NS",
     "HDFC Bank": "HDFCBANK.NS",
@@ -70,7 +68,7 @@ NIFTY50_TICKERS = {
     "UPL": "UPL.NS",
     "Shree Cement": "SHREECEM.NS",
     "Hindalco": "HINDALCO.NS",
-    "JSW Energy": "JSWENERGY.NS"  # you can replace if needed
+    "JSW Energy": "JSWENERGY.NS"  # can replace if needed
 }
 
 # ------------- SIDEBAR CONTROLS -------------
@@ -84,19 +82,11 @@ stock_name = st.sidebar.selectbox(
 
 ticker = NIFTY50_TICKERS[stock_name]
 
-# Date range: default last 1 year
 today = date.today()
 default_start = today - timedelta(days=365)
 
 start_date = st.sidebar.date_input("Start Date", value=default_start)
 end_date = st.sidebar.date_input("End Date", value=today)
-
-interval = st.sidebar.selectbox(
-    "Interval",
-    options=["1d", "1h", "30m", "15m"],
-    index=0,
-    help="For intraday intervals, Yahoo may return last 60-90 days only."
-)
 
 st.sidebar.markdown("---")
 st.sidebar.write("Made with ❤️ using Streamlit & yfinance")
@@ -104,111 +94,156 @@ st.sidebar.write("Made with ❤️ using Streamlit & yfinance")
 # ------------- DATA DOWNLOAD FUNCTION -------------
 @st.cache_data(show_spinner=True)
 def load_data(ticker_symbol, start, end, interval="1d"):
+    """Download OHLCV data from Yahoo Finance."""
     df = yf.download(
         ticker_symbol,
         start=start,
-        end=end + timedelta(days=1),  # include end date
+        end=end + timedelta(days=1),  # to include end date
         interval=interval,
         auto_adjust=True
     )
+    # Ensure DatetimeIndex and sorted
+    df = df.copy()
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
     return df
 
 # ------------- INDICATOR CALCULATION -------------
-def add_indicators(df):
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Simple Moving Averages
+
+    # --- SMA ---
     df["SMA20"] = df["Close"].rolling(window=20).mean()
     df["SMA50"] = df["Close"].rolling(window=50).mean()
     df["SMA200"] = df["Close"].rolling(window=200).mean()
 
-    # RSI using ta library
-    rsi_indicator = ta.momentum.RSIIndicator(close=df["Close"], window=14)
+    # --- RSI (fix for 2D close problem) ---
+    close = df["Close"]
+    # If for some reason Close is a DataFrame (2D), take first column
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+
+    rsi_indicator = ta.momentum.RSIIndicator(close=close, window=14)
     df["RSI"] = rsi_indicator.rsi()
 
     return df
+
+# ------------- CHART FUNCTION -------------
+def plot_price_and_sma(df: pd.DataFrame, title_suffix: str):
+    fig_price = go.Figure()
+
+    fig_price.add_trace(go.Candlestick(
+        x=df.index,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        name="Price"
+    ))
+
+    fig_price.add_trace(go.Scatter(
+        x=df.index,
+        y=df["SMA20"],
+        mode="lines",
+        name="SMA20"
+    ))
+    fig_price.add_trace(go.Scatter(
+        x=df.index,
+        y=df["SMA50"],
+        mode="lines",
+        name="SMA50"
+    ))
+    fig_price.add_trace(go.Scatter(
+        x=df.index,
+        y=df["SMA200"],
+        mode="lines",
+        name="SMA200"
+    ))
+
+    fig_price.update_layout(
+        title=f"{title_suffix} — Price with SMA 20/50/200",
+        xaxis_title="Date",
+        yaxis_title="Price (₹)",
+        xaxis_rangeslider_visible=False,
+        height=600,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_price, use_container_width=True)
+
+
+def plot_rsi(df: pd.DataFrame, title_suffix: str):
+    fig_rsi = go.Figure()
+    fig_rsi.add_trace(go.Scatter(
+        x=df.index,
+        y=df["RSI"],
+        mode="lines",
+        name="RSI"
+    ))
+
+    # Overbought / oversold lines
+    fig_rsi.add_hline(y=70, line_dash="dash", annotation_text="Overbought (70)")
+    fig_rsi.add_hline(y=30, line_dash="dash", annotation_text="Oversold (30)")
+
+    fig_rsi.update_layout(
+        title=f"{title_suffix} — RSI (14)",
+        xaxis_title="Date",
+        yaxis_title="RSI",
+        height=350,
+    )
+    st.plotly_chart(fig_rsi, use_container_width=True)
 
 # ------------- MAIN LOGIC -------------
 if start_date > end_date:
     st.error("❌ Start date must be before end date.")
 else:
-    with st.spinner("Fetching data from Yahoo Finance..."):
-        data = load_data(ticker, start_date, end_date, interval)
+    st.subheader(f"🧾 {stock_name} ({ticker}) — Multi-Timeframe View")
 
-    if data.empty:
-        st.warning("No data returned. Try changing date range or interval.")
-    else:
-        data = add_indicators(data)
+    timeframes = {
+        "Daily": "1d",
+        "Hourly": "1h",
+        "Weekly": "1wk",
+    }
 
-        st.subheader(f"📈 {stock_name} ({ticker}) Price & SMA")
+    tab_daily, tab_hourly, tab_weekly = st.tabs(["📅 Daily", "⏱ Hourly", "📆 Weekly"])
 
-        # ------------ PRICE + SMA CHART ------------
-        fig_price = go.Figure()
+    # ---- DAILY TAB ----
+    with tab_daily:
+        with st.spinner("Fetching Daily data..."):
+            df_daily = load_data(ticker, start_date, end_date, timeframes["Daily"])
 
-        # Candlestick
-        fig_price.add_trace(go.Candlestick(
-            x=data.index,
-            open=data["Open"],
-            high=data["High"],
-            low=data["Low"],
-            close=data["Close"],
-            name="Price"
-        ))
+        if df_daily.empty:
+            st.warning("No daily data returned. Try changing date range.")
+        else:
+            df_daily = add_indicators(df_daily)
+            plot_price_and_sma(df_daily, f"{stock_name} — Daily")
+            plot_rsi(df_daily, f"{stock_name} — Daily")
+            with st.expander("📄 Show Daily data (last 200 rows)"):
+                st.dataframe(df_daily[["Close", "SMA20", "SMA50", "SMA200", "RSI"]].tail(200))
 
-        # SMA lines
-        fig_price.add_trace(go.Scatter(
-            x=data.index,
-            y=data["SMA20"],
-            mode="lines",
-            name="SMA20"
-        ))
-        fig_price.add_trace(go.Scatter(
-            x=data.index,
-            y=data["SMA50"],
-            mode="lines",
-            name="SMA50"
-        ))
-        fig_price.add_trace(go.Scatter(
-            x=data.index,
-            y=data["SMA200"],
-            mode="lines",
-            name="SMA200"
-        ))
+    # ---- HOURLY TAB ----
+    with tab_hourly:
+        with st.spinner("Fetching Hourly data (Yahoo usually gives last ~60–90 days)..."):
+            df_hourly = load_data(ticker, start_date, end_date, timeframes["Hourly"])
 
-        fig_price.update_layout(
-            xaxis_title="Date",
-            yaxis_title="Price (₹)",
-            xaxis_rangeslider_visible=False,
-            height=600,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
+        if df_hourly.empty:
+            st.warning("No hourly data available for this range (Yahoo limit). Try a shorter date range.")
+        else:
+            df_hourly = add_indicators(df_hourly)
+            plot_price_and_sma(df_hourly, f"{stock_name} — Hourly")
+            plot_rsi(df_hourly, f"{stock_name} — Hourly")
+            with st.expander("📄 Show Hourly data (last 300 rows)"):
+                st.dataframe(df_hourly[["Close", "SMA20", "SMA50", "SMA200", "RSI"]].tail(300))
 
-        st.plotly_chart(fig_price, use_container_width=True)
+    # ---- WEEKLY TAB ----
+    with tab_weekly:
+        with st.spinner("Fetching Weekly data..."):
+            df_weekly = load_data(ticker, start_date, end_date, timeframes["Weekly"])
 
-        # ------------ RSI CHART ------------
-        st.subheader("📉 RSI (14)")
-
-        fig_rsi = go.Figure()
-        fig_rsi.add_trace(go.Scatter(
-            x=data.index,
-            y=data["RSI"],
-            mode="lines",
-            name="RSI"
-        ))
-
-        # Overbought / oversold reference lines
-        fig_rsi.add_hline(y=70, line_dash="dash", annotation_text="Overbought (70)")
-        fig_rsi.add_hline(y=30, line_dash="dash", annotation_text="Oversold (30)")
-
-        fig_rsi.update_layout(
-            xaxis_title="Date",
-            yaxis_title="RSI",
-            height=350,
-        )
-
-        st.plotly_chart(fig_rsi, use_container_width=True)
-
-        # ------------ DATA TABLE ------------
-        with st.expander("📄 Show raw data with indicators"):
-            st.dataframe(
-                data[["Close", "SMA20", "SMA50", "SMA200", "RSI"]].tail(200)
-            )
+        if df_weekly.empty:
+            st.warning("No weekly data returned. Try changing date range.")
+        else:
+            df_weekly = add_indicators(df_weekly)
+            plot_price_and_sma(df_weekly, f"{stock_name} — Weekly")
+            plot_rsi(df_weekly, f"{stock_name} — Weekly")
+            with st.expander("📄 Show Weekly data (all rows)"):
+                st.dataframe(df_weekly[["Close", "SMA20", "SMA50", "SMA200", "RSI"]])
