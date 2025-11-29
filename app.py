@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (RSI < 20)")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (RSI < 20 OR 100-bar Extreme Low)")
 
 
 # ---------------- DATA LOADER ----------------
@@ -77,23 +77,36 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------- WAVE 0 DETECTION (RSI < 20 ONLY) ----------------
+# ---------------- WAVE 0 DETECTION ----------------
 def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Mark Wave 0 wherever RSI < 20.
-    No pivot check.
-    No future higher high check.
-    No trend check.
+    Mark Wave 0 when EITHER condition is true:
 
-    Wave0 = (RSI_14 < 20)
+    1️⃣ RSI condition:
+       - RSI_14 < 20  (very oversold)
+
+    2️⃣ 100-candle extreme-low condition:
+       - Low is the minimum in a centered window of 100 bars back and 100 bars forward
+         → i.e., rolling window of 201 candles (center=True).
+
+    Wave0 = (RSI_14 < 20) OR (Low == rolling_min(Low, window=201, center=True))
     """
     df = df.copy()
     df["Wave0"] = False
 
-    if df.empty or "RSI_14" not in df.columns:
+    if df.empty or "RSI_14" not in df.columns or "Low" not in df.columns:
         return df
 
-    df.loc[df["RSI_14"] < 20, "Wave0"] = True
+    # Condition 1: RSI < 20
+    cond_rsi = df["RSI_14"] < 20
+
+    # Condition 2: Lowest low in 100 candles back and forth (window=201, centered)
+    rolling_min_low = df["Low"].rolling(window=201, center=True, min_periods=1).min()
+    # Use small epsilon to avoid float issues
+    eps = 1e-8
+    cond_extreme_low = df["Low"] <= (rolling_min_low + eps)
+
+    df.loc[cond_rsi | cond_extreme_low, "Wave0"] = True
     return df
 
 
@@ -153,7 +166,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                 col=1,
             )
 
-    # --- Wave 0 label (if any) ---
+    # --- Wave 0 label (bold) ---
     if "Wave0" in df.columns:
         wave0_df = df[df["Wave0"]]
         if not wave0_df.empty:
@@ -162,9 +175,9 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     x=wave0_df.index,
                     y=wave0_df["Low"] * 0.995,  # slightly below the low
                     mode="text",
-                    text=["<b>0</b>"] * len(wave0_df),
+                    text=["<b>0</b>"] * len(wave0_df),   # BOLD 0
                     textposition="middle center",
-                    name="Wave 0 (RSI < 20)",
+                    name="Wave 0 (RSI < 20 OR 100-bar Low)",
                 ),
                 row=1,
                 col=1,
