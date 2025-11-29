@@ -117,10 +117,10 @@ def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- CHART ----------------
 def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
-    TradingView-style layout:
-    Row 1: Candlestick + SMA20/50/200 + Wave 0 label (if any)
-    Row 2: Volume bars
-    Row 3: RSI(14)
+    Bigger TradingView-style layout:
+    Row 1: Candlestick (larger) + SMA + Wave 0
+    Row 2: Volume (smaller)
+    Row 3: RSI (smaller)
     """
     if df is None or df.empty:
         return go.Figure()
@@ -131,8 +131,8 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
         rows=3,
         cols=1,
         shared_xaxes=True,
-        row_heights=[0.6, 0.2, 0.2],
-        vertical_spacing=0.03,
+        row_heights=[0.72, 0.15, 0.13],   # ⬅️ Bigger main chart
+        vertical_spacing=0.02,
         specs=[
             [{"type": "candlestick"}],
             [{"type": "bar"}],
@@ -177,11 +177,11 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
             fig.add_trace(
                 go.Scatter(
                     x=wave0_df.index,
-                    y=wave0_df["Low"] * 0.995,  # slightly below the low
+                    y=wave0_df["Low"] * 0.995,
                     mode="text",
-                    text=["<b>0</b>"] * len(wave0_df),   # BOLD 0
+                    text=["<b>0</b>"] * len(wave0_df),
                     textposition="middle center",
-                    name="Wave 0 (RSI < 20 OR 100-bar Low)",
+                    name="Wave 0",
                 ),
                 row=1,
                 col=1,
@@ -222,17 +222,19 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
             col=1,
         )
 
-    fig.update_xaxes(showspikes=True)
-    fig.update_yaxes(showspikes=True)
-
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
+        height=900,  # ⬅️ Increased chart height
         margin=dict(l=10, r=10, t=40, b=10),
     )
 
+    fig.update_xaxes(showspikes=True)
+    fig.update_yaxes(showspikes=True)
+
     return fig
+
 
 
 # ---------------- SIDEBAR ----------------
