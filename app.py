@@ -214,32 +214,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     df["Wave0"] = final_wave0_mask
 
     # ---- Wave 5 / B: highest High between two final 0s, classified by direction ----
-    df["Wave5"] = False
-    df["WaveB"] = False
-
-    if len(zeros) >= 2:
-        for k in range(len(zeros) - 1):
-            start_i = zeros[k]
-            end_i = zeros[k + 1]
-
-            if end_i - start_i <= 1:
-                continue
-
-            seg = df.iloc[start_i + 1 : end_i]
-            if seg.empty:
-                continue
-
-            idx_max_high = seg["High"].idxmax()
-
-            low_start = low.iloc[start_i]
-            low_end = low.iloc[end_i]
-
-            if low_end < low_start:
-                # Price fell to a lower 0 → treat as ABC, mark B
-                df.loc[idx_max_high, "WaveB"] = True
-            else:
-                # Higher or equal second 0 → impulse, mark 5
-                df.loc[idx_max_high, "Wave5"] = True
+   
 
     return df
 
