@@ -197,7 +197,6 @@ def check_impulse_correction_rules(prices, seq):
 
     # Extract indices & prices
     idxs = [i for i, _ in seq]
-    kinds = [k for _, k in seq]
     p = [prices[i] for i in idxs]
 
     # Decide trend (up or down) based on W0->W1
@@ -472,8 +471,7 @@ def hourly_rules(df: pd.DataFrame):
         "Elliott phase is 0/2 or not labeled": cond_ell,
     }
 
-    score = sum(flags.values())
-    decision = 1 if score >= 2 else 0   # need at least 2/4
+    decision = 1 if sum(flags.values()) >= 2 else 0   # need at least 2/4
     return decision, flags
 
 
@@ -512,8 +510,7 @@ def daily_rules(df: pd.DataFrame):
         "Bullish RSI divergence present": cond_div,
     }
 
-    score = sum(flags.values())
-    decision = 1 if score >= 3 else 0   # need 3/5
+    decision = 1 if sum(flags.values()) >= 3 else 0   # need 3/5
     return decision, flags
 
 
@@ -545,8 +542,7 @@ def weekly_rules(df: pd.DataFrame):
         "Elliott phase in 2 / 4": cond_ell,
     }
 
-    score = sum(flags.values())
-    decision = 1 if score >= 2 else 0   # need 2/4
+    decision = 1 if sum(flags.values()) >= 2 else 0   # need 2/4
     return decision, flags
 
 
@@ -679,7 +675,7 @@ def combined_buy_signal(df: pd.DataFrame, timeframe: str, return_reason: bool = 
         return final
 
 
-# ---------- PLOTTING ----------
+# ---------- PLOTTING (NO MORE dropna) ----------
 
 def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
     needed_cols = ["Open", "High", "Low", "Close", "sma22", "sma50", "sma200", "rsi"]
@@ -688,7 +684,6 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
             st.warning("Not enough data to plot indicators.")
             return
 
-    df = df.dropna(subset=["sma22", "sma50", "sma200", "rsi"]).copy()
     if df.empty:
         st.warning("Not enough data to plot.")
         return
@@ -701,7 +696,7 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
         row_heights=[0.7, 0.3],
     )
 
-    # Price + SMAs
+    # Price + SMAs (Plotly will ignore NaNs)
     fig.add_trace(
         go.Candlestick(
             x=df.index,
@@ -739,7 +734,7 @@ def plot_chart(df: pd.DataFrame, ticker: str, timeframe: str):
             fig.add_annotation(
                 x=ts,
                 y=price,
-                text=label,
+                text=str(label),
                 showarrow=True,
                 arrowhead=1,
                 ax=0,
