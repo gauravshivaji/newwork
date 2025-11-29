@@ -137,8 +137,8 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     future_7_higher = np.zeros(n, dtype=bool)
 
     # Only valid if we have at least 7 candles ahead
-    for i in range(n - 7):
-        if close.iloc[i + 7] > close.iloc[i]:
+    for i in range(n - 10):
+        if close.iloc[i + 10] > close.iloc[i]:
             future_7_higher[i] = True
 
     # Final Wave0 mask
