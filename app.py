@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Elliott (Loose Rules)")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Elliott (Loose + Custom Rules)")
 
 
 # ---------------- DATA LOADER ----------------
@@ -69,21 +69,21 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------- LOOSE ELLIOTT ENGINE ----------------
+# ---------------- LOOSE ELLIOTT ENGINE + YOUR RULES ----------------
 def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataFrame:
     """
-    Loose Elliott implementation based on your ML-friendly rules:
+    Loose Elliott + custom rules:
 
-    - Detect pivots via rolling HH/LL (zigzag-like).
-    - Find sequences of 6 pivots L-H-L-H-L-H (uptrend impulse).
-    - Loose checks for 1–5:
-        * Wave 2 deep retrace, may come close to W0 (max ~2% break).
-        * Wave 3 breaks W1 high clearly and is reasonably strong.
-        * Wave 4 may overlap W1 but only ~10% of W1 range.
-        * Wave 5 makes new high or small truncation (3% below W3).
-        * Higher highs + higher lows with tolerance.
-        * RSI strongest on Wave 3, Wave 5 shows divergence.
-    - Then optional loose ABC (L-H-L) correction after 5.
+    Base loose impulse logic:
+      - Detect pivots (zigzag-like).
+      - Look for L-H-L-H-L-H sequence as 0-1-2-3-4-5 (uptrend).
+      - Loose rules for wave lengths, overlaps, RSI, etc.
+
+    Your extra rules:
+      (1) If RSI is oversold for a long time before the starting low,
+          mark that pivot as Wave 0.
+      (2) If we find a higher high after Wave 3, update label to that newer pivot.
+      (3) If we find a higher high after Wave 5, update label to that newer pivot.
     """
     df = df.copy()
     needed = {"High", "Low", "Close"}
@@ -93,7 +93,7 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
     if df is None or df.empty or not needed.issubset(df.columns):
         return df
 
-    # --- Pivot detection (zigzag style) ---
+    # --- Pivot detection (zigzag style using rolling HH/LL) ---
     w = max(3, pivot_window)
     if w % 2 == 0:
         w += 1
@@ -113,6 +113,9 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
     if len(pivots) < 6:
         return df
 
+    def safe_div(a, b):
+        return a / b if (b is not None and b != 0) else np.nan
+
     best_seq = None
     best_start = None
 
@@ -128,9 +131,6 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
         w0, w1, w2, w3, w4, w5 = seq
         l0, l2, l4 = w0["price"], w2["price"], w4["price"]
         h1, h3, h5 = w1["price"], w3["price"], w5["price"]
-
-        def safe_div(a, b):
-            return a / b if (b is not None and b != 0) else np.nan
 
         len1 = h1 - l0
         len3 = h3 - l2
@@ -152,22 +152,22 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
         if h3 < h1 * 1.01:
             continue
 
-        # Wave 4: shallow-ish, overlap with Wave1 allowed up to 10% of W1 range
+        # Wave 4 overlap allowed up to 10% of W1 range
         wave1_range = h1 - l0
         if wave1_range <= 0:
             continue
-        overlap = max(0.0, h1 - l4)  # distance into Wave1 zone
+        overlap = max(0.0, h1 - l4)
         overlap_frac = overlap / wave1_range
         if overlap_frac > 0.1:
             continue
 
-        # Higher highs / higher lows with tolerance
+        # Higher highs + higher lows with tolerance
         if not (h3 >= h1 * 1.01 and h5 >= h3 * 0.97):
             continue
         if not (l2 >= l0 * 0.98 and l4 >= l2 * 0.98):
             continue
 
-        # Wave 3 should be reasonably strong vs Wave1
+        # Wave 3 reasonably strong vs Wave1
         if len3 < len1 * 0.8:
             continue
 
@@ -176,16 +176,16 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
         if np.isnan(len5_ratio) or not (0.3 <= len5_ratio <= 1.2):
             continue
 
-        # Wave 5: can be truncated but not more than 3% below Wave3
+        # Wave 5: truncation allowed, but not more than 3% below W3
         if h5 < h3 * 0.97:
             continue
 
-        # ----- RSI / momentum checks (loose) -----
+        # ----- RSI / momentum checks -----
         rsi1 = df.loc[w1["idx"], "RSI_14"] if "RSI_14" in df.columns else np.nan
         rsi3 = df.loc[w3["idx"], "RSI_14"] if "RSI_14" in df.columns else np.nan
         rsi5 = df.loc[w5["idx"], "RSI_14"] if "RSI_14" in df.columns else np.nan
 
-        # Wave 3 should have strongest RSI among pivot highs, and above 50
+        # Wave 3 should have the strongest RSI among highs and be above 50
         if not np.isnan(rsi3):
             if (not np.isnan(rsi1) and rsi3 < rsi1 - 1) or \
                (not np.isnan(rsi5) and rsi3 < rsi5 - 1):
@@ -198,25 +198,81 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
             if rsi5 > rsi3 + 2:
                 continue
 
-        # Keep LAST valid loose impulse found
+        # Keep LAST valid loose impulse
         best_seq = seq
         best_start = j
 
     if not best_seq:
         return df
 
-    # ---------- Assign 1–5 labels (skip Wave0) ----------
+    # ---------- YOUR RULE 2 & 3: dynamic update of wave 3 and 5 ----------
+    # Re-read w0..w5 from pivots
+    w0, w1, w2, w3, w4, w5 = best_seq
+    h3 = w3["price"]
+    h5 = w5["price"]
+
+    # Find index positions in the full pivot list
+    idx0 = best_start
+    idx1 = best_start + 1
+    idx2 = best_start + 2
+    idx3 = best_start + 3
+    idx4 = best_start + 4
+    idx5 = best_start + 5
+
+    # Rule: if we found HH after 3rd pivot, update wave 3 to new higher high
+    # Search pivots strictly between current 3 and 4
+    if idx3 + 1 < idx4:
+        slice_3 = pivots[idx3 + 1:idx4]
+        better_highs_3 = [p for p in slice_3 if p["type"] == "H" and p["price"] > h3 * 1.001]
+        if better_highs_3:
+            # choose the highest high
+            new_w3 = max(better_highs_3, key=lambda p: p["price"])
+            w3 = new_w3
+            h3 = w3["price"]
+            best_seq[3] = w3  # update sequence
+
+    # Rule: if we found HH after 5th pivot, update wave 5 to new higher high
+    if idx5 + 1 < len(pivots):
+        slice_5 = pivots[idx5 + 1:]
+        better_highs_5 = [p for p in slice_5 if p["type"] == "H" and p["price"] > h5 * 1.001]
+        if better_highs_5:
+            # choose the last highest high (latest pivot with highest price)
+            max_price = max(p["price"] for p in better_highs_5)
+            candidates = [p for p in better_highs_5 if p["price"] == max_price]
+            new_w5 = candidates[-1]
+            w5 = new_w5
+            h5 = w5["price"]
+            best_seq[5] = w5
+
+    # Reassign after update
+    w0, w1, w2, w3, w4, w5 = best_seq
+
+    # ---------- YOUR RULE 1: mark Wave 0 when RSI oversold for long time ----------
+    if "RSI_14" in df.columns:
+        try:
+            pos0 = df.index.get_loc(w0["idx"])
+            start_pos = max(0, pos0 - 10)  # look back 10 bars
+            window = df.iloc[start_pos:pos0 + 1]
+            oversold = window["RSI_14"] < 30
+            # "for long time" → at least 5 bars oversold in that lookback
+            if oversold.sum() >= 5:
+                df.loc[w0["idx"], "Elliott_Label"] = "0"
+                df.loc[w0["idx"], "Elliott_Pivot_Type"] = "L"
+        except KeyError:
+            pass
+
+    # ---------- Assign 1–5 labels (using possibly updated 3 & 5) ----------
     impulse_labels = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
     for i, p in enumerate(best_seq):
         if i == 0:
-            continue
+            continue  # wave 0 already handled separately
         lbl = impulse_labels.get(i)
         if lbl is None:
             continue
         df.loc[p["idx"], "Elliott_Label"] = lbl
         df.loc[p["idx"], "Elliott_Pivot_Type"] = p["type"]
 
-    # ---------- Loose ABC correction after 5 ----------
+    # ---------- Optional loose ABC correction after 5 ----------
     if best_start is not None and best_start + 6 < len(pivots):
         tail = pivots[best_start + 6:]
         if len(tail) >= 3:
@@ -225,26 +281,16 @@ def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataF
 
             # Expect down correction after bullish impulse: L-H-L
             if [tA, tB, tC] == ["L", "H", "L"]:
-                w5 = best_seq[5]
                 low5 = w5["price"]
                 lowA, highB, lowC = A["price"], B["price"], C["price"]
 
-                # A should represent real down move from wave5
-                # (slightly loose: allow lowA not too far above low5)
-                if lowA >= low5 * 1.02:
-                    pass
-                else:
+                # A should be real down move from wave5
+                if lowA < low5 * 1.02:
                     high5 = w5["price"]
-
                     # B can exceed wave5 high by up to ~10% (expanded flat)
-                    if highB > high5 * 1.10:
-                        pass
-                    else:
+                    if highB <= high5 * 1.10:
                         # C usually goes below A, but failed C allowed up to ~2% above
-                        if lowC > lowA * 1.02:
-                            pass
-                        else:
-                            # loose Fib: C 0.5–2.0 × A
+                        if lowC <= lowA * 1.02:
                             lenA = high5 - lowA
                             lenC = highB - lowC
                             if lenA > 0:
@@ -307,16 +353,16 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                 col=1,
             )
 
-    # Elliott labels
+    # Elliott labels (0,1,2,3,4,5,A,B,C)
     if "Elliott_Label" in df.columns:
         label_df = df[df["Elliott_Label"].notna()]
         if not label_df.empty:
             ys = []
             for _, row in label_df.iterrows():
                 if "Elliott_Pivot_Type" in row and row["Elliott_Pivot_Type"] == "L":
-                    ys.append(row["Low"] * 0.995)   # below low
+                    ys.append(row["Low"] * 0.995)   # below lows
                 else:
-                    ys.append(row["High"] * 1.005)  # above high
+                    ys.append(row["High"] * 1.005)  # above highs
 
             fig.add_trace(
                 go.Scatter(
@@ -325,7 +371,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     mode="text",
                     text=label_df["Elliott_Label"],
                     textposition="middle center",
-                    name="Elliott (Loose)",
+                    name="Elliott (Loose + Custom)",
                 ),
                 row=1,
                 col=1,
