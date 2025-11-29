@@ -93,16 +93,20 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
         Condition 2 (structural low):
           - Low is lowest in centered 201-bar window (100 back + 100 forward)
 
-      NEW extra rule for 0:
+      Extra rule 1 (trend confirmation):
         - After 7 candles, price must be higher than at 0:
               Close[i+7] > Close[i]
 
+      Extra rule 2 (spacing):
+        - If two 0s are closer than 30 candles,
+          keep the first one and remove the later one.
+
       Final Wave0:
-        Wave0 = base_zero AND future_7_higher
+        base_zero AND future_7_higher, then apply 30-bar spacing filter.
 
     Wave 5:
 
-      - Take all Wave0 positions
+      - Take all final Wave0 positions
       - For each pair of consecutive 0s:
           look between them (exclusive of second 0)
           find highest High in that segment
@@ -126,23 +130,37 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     cond_rsi_price = (rsi < 20) & (rsi > rsi.shift(1)) & (close > close.shift(1))
 
     # Condition 2: Extreme 100-bar low (centered 201 bars)
-    rolling_min_low = df["Low"].rolling(window=201, center=True, min_periods=1).min()
+    rolling_min_low = df["Low"].rolling(window=101, center=True, min_periods=1).min()
     eps = 1e-8
     cond_extreme_low = df["Low"] <= (rolling_min_low + eps)
 
     base_zero = cond_rsi_price | cond_extreme_low
 
-    # ---- NEW: after 7 candles, price should be greater than at 0 ----
+    # ---- Extra rule 1: after 7 candles, price should be greater than at 0 ----
     n = len(df)
     future_7_higher = np.zeros(n, dtype=bool)
 
-    # Only valid if we have at least 7 candles ahead
-    for i in range(n - 30):
-        if close.iloc[i + 30] > close.iloc[i]:
+    for i in range(n - 22):
+        if close.iloc[i + 22] > close.iloc[i]:
             future_7_higher[i] = True
 
-    # Final Wave0 mask
-    df["Wave0"] = base_zero & future_7_higher
+    # Initial Wave0 mask before spacing filter
+    wave0_mask = base_zero & future_7_higher
+
+    # ---- Extra rule 2: enforce minimum 30-candle distance between 0s ----
+    idx_candidates = np.where(wave0_mask)[0]
+    final_wave0_mask = np.zeros(n, dtype=bool)
+
+    min_gap = 30  # minimum distance between 0s in candles
+    last_kept = -10**9
+
+    for i in idx_candidates:
+        if i - last_kept >= min_gap:
+            final_wave0_mask[i] = True
+            last_kept = i
+        # else: too close to previous 0, discard this one
+
+    df["Wave0"] = final_wave0_mask
 
     # ---- Wave 5: highest High between two 0s ----
     wave0_positions = np.where(df["Wave0"].values)[0]
@@ -309,16 +327,12 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
 st.sidebar.header("⚙️ Settings")
 
 default_tickers = [
-    "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS",
-"BAJAJ-AUTO.NS", "BAJAJFINSV.NS", "BAJFINANCE.NS", "BHARTIARTL.NS", "BPCL.NS",
-"BRITANNIA.NS", "CIPLA.NS", "COALINDIA.NS", "DIVISLAB.NS", "DRREDDY.NS",
-"EICHERMOT.NS", "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", "HDFCLIFE.NS",
-"HEROMOTOCO.NS", "HINDALCO.NS", "HINDUNILVR.NS", "ICICIBANK.NS", "INDUSINDBK.NS",
-"INFY.NS", "ITC.NS", "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
-"MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS", "POWERGRID.NS", "RELIANCE.NS",
-"SBILIFE.NS", "SBIN.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS",
-"TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS",
-
+    "RELIANCE.NS",
+    "HDFCBANK.NS",
+    "TCS.NS",
+    "INFY.NS",
+    "ICICIBANK.NS",
+    "NIFTY.NS",
 ]
 
 ticker = st.sidebar.selectbox(
