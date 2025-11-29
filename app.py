@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Elliott (1-5, A, B, C)")
 
 
 # ---------------- HELPERS ----------------
@@ -77,10 +77,66 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_elliott_wave_labels(df: pd.DataFrame, pivot_window: int = 5) -> pd.DataFrame:
+    """
+    Very simple Elliott-like labelling:
+    1. Detect swing highs/lows using local window.
+    2. Take the last 8 pivots.
+    3. Label them as 1,2,3,4,5,A,B,C in order.
+
+    This is heuristic & educational, not a full Elliott engine.
+    """
+    if df is None or df.empty:
+        return df
+
+    if not {"High", "Low", "Close"}.issubset(df.columns):
+        return df
+
+    w = max(3, pivot_window)  # at least 3, must be odd for "center"
+    if w % 2 == 0:
+        w += 1  # make it odd
+
+    # Local highest high / lowest low in rolling window
+    df["HH"] = df["High"].rolling(w, center=True).max()
+    df["LL"] = df["Low"].rolling(w, center=True).min()
+
+    df["pivot_high"] = (df["High"] == df["HH"])
+    df["pivot_low"] = (df["Low"] == df["LL"])
+
+    pivots = df[(df["pivot_high"] | df["pivot_low"])].copy()
+
+    # Need at least some pivots to label
+    if len(pivots) < 5:
+        df["Elliott_Label"] = np.nan
+        df["Elliott_Pivot_Type"] = np.nan
+        return df
+
+    # Take last up-to-8 pivots
+    labels_full = ["1", "2", "3", "4", "5", "A", "B", "C"]
+    n = min(len(labels_full), len(pivots))
+    pivots = pivots.iloc[-n:]
+    labels = labels_full[-n:]  # align to last n points
+
+    df["Elliott_Label"] = np.nan
+    df["Elliott_Pivot_Type"] = np.nan
+
+    for (idx, row), label in zip(pivots.iterrows(), labels):
+        df.at[idx, "Elliott_Label"] = label
+        if row["pivot_high"]:
+            df.at[idx, "Elliott_Pivot_Type"] = "H"
+        elif row["pivot_low"]:
+            df.at[idx, "Elliott_Pivot_Type"] = "L"
+
+    # You can drop helper cols if you want less clutter, but they don't hurt
+    # df.drop(columns=["HH", "LL", "pivot_high", "pivot_low"], inplace=True)
+
+    return df
+
+
 def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
     TradingView-style layout:
-    Row 1: Candlestick + SMA20/50/200
+    Row 1: Candlestick + SMA20/50/200 + Elliott labels
     Row 2: Volume bars
     Row 3: RSI(14)
     """
@@ -126,6 +182,32 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     y=df[col_name],
                     mode="lines",
                     name=name,
+                ),
+                row=1,
+                col=1,
+            )
+
+    # --- Elliott Labels (1-5, A, B, C) ---
+    if "Elliott_Label" in df.columns:
+        label_df = df[df["Elliott_Label"].notna()]
+        if not label_df.empty:
+            ys = []
+            for idx, row in label_df.iterrows():
+                if "Elliott_Pivot_Type" in row and row["Elliott_Pivot_Type"] == "L":
+                    # place slightly below the low
+                    ys.append(row["Low"] * 0.995)
+                else:
+                    # place slightly above the high
+                    ys.append(row["High"] * 1.005)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=label_df.index,
+                    y=ys,
+                    mode="text",
+                    text=label_df["Elliott_Label"],
+                    textposition="middle center",
+                    name="Elliott Waves",
                 ),
                 row=1,
                 col=1,
@@ -222,6 +304,7 @@ with tabs[0]:
     st.subheader(f"⏱ Hourly — last 60 days — {ticker}")
     df_h = load_data(ticker, period="60d", interval="1h")
     df_h = add_indicators(df_h)
+    df_h = add_elliott_wave_labels(df_h, pivot_window=5)
 
     if df_h.empty:
         st.warning("No hourly data found for this symbol.")
@@ -234,6 +317,7 @@ with tabs[1]:
     st.subheader(f"📅 Daily — last 3 years — {ticker}")
     df_d = load_data(ticker, period="3y", interval="1d")
     df_d = add_indicators(df_d)
+    df_d = add_elliott_wave_labels(df_d, pivot_window=5)
 
     if df_d.empty:
         st.warning("No daily data found for this symbol.")
@@ -246,6 +330,7 @@ with tabs[2]:
     st.subheader(f"📆 Weekly — last 10 years — {ticker}")
     df_w = load_data(ticker, period="10y", interval="1wk")
     df_w = add_indicators(df_w)
+    df_w = add_elliott_wave_labels(df_w, pivot_window=5)
 
     if df_w.empty:
         st.warning("No weekly data found for this symbol.")
