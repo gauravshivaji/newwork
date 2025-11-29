@@ -140,8 +140,8 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     n = len(df)
     future_7_higher = np.zeros(n, dtype=bool)
 
-    for i in range(n - 10):
-        if close.iloc[i + 10] > close.iloc[i]:
+    for i in range(n - 15):
+        if close.iloc[i + 15] > close.iloc[i]:
             future_7_higher[i] = True
 
     # Initial Wave0 mask before spacing filter
