@@ -34,13 +34,16 @@ def load_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
-    df = df.dropna().copy()
-    df.reset_index(inplace=True)
+    # If columns are MultiIndex (happens with some yfinance versions),
+    # keep only the first level: Open, High, Low, Close, Volume, etc.
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
-    # Ensure datetime column is named 'Date'
-    if "Date" not in df.columns:
-        first_col = df.columns[0]
-        df.rename(columns={first_col: "Date"}, inplace=True)
+    df = df.dropna().copy()
+
+    # Ensure index is datetime for plotting
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
 
     return df
 
@@ -50,24 +53,26 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
+    if "Close" not in df.columns:
+        return df
+
     # ---- Simple Moving Averages ----
-    if "Close" in df.columns:
-        for win in [20, 50, 200]:
-            df[f"SMA_{win}"] = df["Close"].rolling(window=win).mean()
+    for win in [20, 50, 200]:
+        df[f"SMA_{win}"] = df["Close"].rolling(window=win).mean()
 
-        # ---- RSI(14) ----
-        window = 14
-        delta = df["Close"].diff()
+    # ---- RSI(14) ----
+    window = 14
+    delta = df["Close"].diff()
 
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
 
-        roll_up = gain.rolling(window=window, min_periods=window).mean()
-        roll_down = loss.rolling(window=window, min_periods=window).mean()
+    roll_up = gain.rolling(window=window, min_periods=window).mean()
+    roll_down = loss.rolling(window=window, min_periods=window).mean()
 
-        rs = roll_up / roll_down
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        df["RSI_14"] = rsi
+    rs = roll_up / roll_down
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    df["RSI_14"] = rsi
 
     return df
 
@@ -81,6 +86,9 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     """
     if df is None or df.empty:
         return go.Figure()
+
+    # x-axis will be the index (DatetimeIndex)
+    x = df.index
 
     fig = make_subplots(
         rows=3,
@@ -96,7 +104,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     # --- Candles ---
     fig.add_trace(
         go.Candlestick(
-            x=df["Date"],
+            x=x,
             open=df["Open"],
             high=df["High"],
             low=df["Low"],
@@ -114,7 +122,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
         if col_name in df.columns:
             fig.add_trace(
                 go.Scatter(
-                    x=df["Date"],
+                    x=x,
                     y=df[col_name],
                     mode="lines",
                     name=name,
@@ -127,7 +135,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     if "Volume" in df.columns:
         fig.add_trace(
             go.Bar(
-                x=df["Date"],
+                x=x,
                 y=df["Volume"],
                 name="Volume",
                 showlegend=False,
@@ -140,7 +148,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
     if "RSI_14" in df.columns:
         fig.add_trace(
             go.Scatter(
-                x=df["Date"],
+                x=x,
                 y=df["RSI_14"],
                 mode="lines",
                 name="RSI 14",
