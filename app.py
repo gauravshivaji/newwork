@@ -97,11 +97,10 @@ hourly_start = today - timedelta(days=60)       # 60 days
 # ------------- DATA DOWNLOAD FUNCTION -------------
 @st.cache_data(show_spinner=True)
 def load_data(ticker_symbol, start, end, interval="1d"):
-    """Download OHLCV data from Yahoo Finance and clean it."""
     df = yf.download(
         ticker_symbol,
         start=start,
-        end=end + timedelta(days=1),  # include end date
+        end=end + timedelta(days=1),
         interval=interval,
         auto_adjust=False
     )
@@ -113,14 +112,11 @@ def load_data(ticker_symbol, start, end, interval="1d"):
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
 
-    # 🔹 If columns are MultiIndex (e.g. ('Open','RELIANCE.NS')), flatten them
+    # 🔹 Flatten MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [
-            col[0] if isinstance(col, tuple) else col
-            for col in df.columns
-        ]
+        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
 
-    # 🔹 Ensure OHLC are numeric (Series, not DataFrame)
+    # 🔹 Fix OHLC types
     for col in ["Open", "High", "Low", "Close"]:
         if col in df.columns:
             series = df[col]
@@ -128,8 +124,11 @@ def load_data(ticker_symbol, start, end, interval="1d"):
                 series = series.iloc[:, 0]
             df[col] = pd.to_numeric(series, errors="coerce")
 
-    # Drop rows where price candles are invalid
+    # 🔹 Remove invalid rows
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
+    # 🔥🔥 REMOVE SATURDAY + SUNDAY + NON-TRADING DAYS
+    df = df[df.index.dayofweek < 5]        # keep only Mon–Fri
 
     return df
 
