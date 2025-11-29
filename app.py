@@ -37,7 +37,7 @@ NIFTY500_TICKERS = [
 
 @st.cache_data(show_spinner=False)
 def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
-    """Download OHLC data for selected timeframe."""
+    """Download OHLC data for selected timeframe and flatten columns."""
     if timeframe == "Daily":
         interval = "1d"
         period = "1y"
@@ -57,29 +57,46 @@ def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
         interval=interval,
         auto_adjust=True,
         progress=False,
+        group_by="column",  # <- important
     )
 
     if df.empty:
         return df
 
-    df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    # 🔥 If columns are MultiIndex (('Close','TCS.NS')), make them simple: 'Close'
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    # Now pick only the standard OHLCV columns
+    wanted_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    df = df[wanted_cols].copy()
+
+    # Ensure numeric
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
     df.dropna(inplace=True)
     return df
+
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add RSI + SMAs + distance features."""
     df = df.copy()
-    df["rsi"] = ta.momentum.rsi(df["Close"], window=14)
-    df["sma22"] = df["Close"].rolling(22).mean()
-    df["sma50"] = df["Close"].rolling(50).mean()
-    df["sma200"] = df["Close"].rolling(200).mean()
+
+    close = df["Close"]  # this is now guaranteed to be a Series
+
+    df["rsi"] = ta.momentum.rsi(close=close, window=14)
+    df["sma22"] = close.rolling(22).mean()
+    df["sma50"] = close.rolling(50).mean()
+    df["sma200"] = close.rolling(200).mean()
 
     for w in [22, 50, 200]:
         sma_col = f"sma{w}"
         df[f"dist_sma{w}"] = (df["Close"] - df[sma_col]) / df[sma_col]
 
     return df
+
 
 
 def find_pivots(prices: np.ndarray, order: int = 5):
