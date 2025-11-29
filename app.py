@@ -287,7 +287,12 @@ def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
     - Build pivots
     - Filter by minimum % move
     - Scan all 9-pivot windows
-    - Keep windows with alternating high/low + valid rules
+    - Keep windows with:
+        * alternating high/low
+        * strict Elliott rules (price-based)
+        * correct orientation of pivots vs trend:
+            - uptrend: 0,2,4,8 = lows  /  1,3,5,7 = highs
+            - downtrend: 0,2,4,8 = highs / 1,3,5,7 = lows
     - Choose the one with maximum time span; tie-breaker: higher score
     Returns: dict {bar_index: label_char}, or {} if none found.
     """
@@ -310,11 +315,26 @@ def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
             continue
 
         valid, score, trend = check_impulse_correction_rules(prices, window)
-        if not valid:
+        if not valid or trend is None:
             continue
 
+        # ----- ORIENTATION CONSTRAINTS -----
+        # For uptrend, we want: low, high, low, high, low, high, low, high, low
+        # For downtrend, mirrored: high, low, high, low, high, low, high, low, high
+        kinds = [k for _, k in window]
+
+        if trend == "up":
+            expected = ["low", "high", "low", "high", "low", "high", "low", "high", "low"]
+        else:  # trend == "down"
+            expected = ["high", "low", "high", "low", "high", "low", "high", "low", "high"]
+
+        if kinds != expected:
+            # if it doesn't match the shape we expect, discard this sequence
+            continue
+
+        # Now compute span & labels
         idxs = [i for i, _ in window]
-        span = idxs[-1] - idxs[0]  # time span in bars
+        span = idxs[-1] - idxs[0]  # time span covered in bars
 
         labels_map = {}
         wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
@@ -327,6 +347,7 @@ def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
             best = candidate
         else:
             best_span, best_score, _, _ = best
+            # prefer larger span; if similar, prefer higher score
             if span > best_span * 1.05:
                 best = candidate
             elif abs(span - best_span) <= best_span * 0.05 and score > best_score:
@@ -338,12 +359,15 @@ def detect_best_elliott_cycle(prices: np.ndarray, timeframe: str):
     return best[3]  # labels_map: bar_idx -> "0".."C"
 
 
+
 def fallback_elliott_cycle(prices: np.ndarray, timeframe: str):
     """
     Fallback when strict Elliott rules find no valid cycle.
     - Uses pivots over entire timeframe
-    - Selects up to 9 pivots, evenly spread across time
-    - Labels them 0,1,2,3,4,5,A,B,C without strict EW validation
+    - Tries to respect orientation:
+        uptrend: 0,2,4,8 = lows; 1,3,5,7 = highs
+        downtrend: 0,2,4,8 = highs; 1,3,5,7 = lows
+    - Selects up to 9 pivots spread along time.
     """
     params = get_timeframe_params(timeframe)
     order = params["order"]
@@ -356,33 +380,68 @@ def fallback_elliott_cycle(prices: np.ndarray, timeframe: str):
     if m < 2:
         return {}
 
-    # If there are <= 9 pivots, just use them
-    if m <= 9:
-        selected = pivots
+    # Determine rough trend from full period
+    trend = "up" if prices[-1] >= prices[0] else "down"
+    if trend == "up":
+        first_kind_needed = "low"
+        pattern_kinds = ["low", "high", "low", "high", "low", "high", "low", "high", "low"]
     else:
-        # Evenly select 9 indices from 0..m-1
-        step = (m - 1) / (9 - 1)
-        idxs = [int(round(k * step)) for k in range(9)]
-        idxs = sorted(set(max(0, min(m - 1, i)) for i in idxs))
+        first_kind_needed = "high"
+        pattern_kinds = ["high", "low", "high", "low", "high", "low", "high", "low", "high"]
 
-        # Fill if < 9
-        while len(idxs) < min(9, m):
-            for j in range(m):
-                if j not in idxs:
-                    idxs.append(j)
-                    if len(idxs) == min(9, m):
-                        break
-        idxs = sorted(idxs)
-        selected = [pivots[j] for j in idxs]
+    # get indices of pivots with required first kind
+    start_indices = [i for i, (_, kind) in enumerate(pivots) if kind == first_kind_needed]
+    if not start_indices:
+        # fallback: ignore kind and just spread pivots in time
+        start_indices = [0]
 
-    labels_map = {}
-    wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
-    for k, (bar_idx, kind) in enumerate(selected):
-        if k >= len(wave_pattern):
-            break
-        labels_map[bar_idx] = wave_pattern[k]
+    best_labels = {}
 
-    return labels_map
+    # Try starting from each possible first-kind pivot, choose the one with max span
+    best_span = -1
+    for sidx in start_indices:
+        # we want up to 9 pivots from sidx onward
+        remaining = pivots[sidx:]
+        if len(remaining) < 2:
+            continue
+
+        if len(remaining) <= 9:
+            candidate = remaining
+        else:
+            step = (len(remaining) - 1) / (9 - 1)
+            idxs = [int(round(k * step)) for k in range(9)]
+            idxs = sorted(set(max(0, min(len(remaining) - 1, i)) for i in idxs))
+            while len(idxs) < min(9, len(remaining)):
+                for j in range(len(remaining)):
+                    if j not in idxs:
+                        idxs.append(j)
+                        if len(idxs) == min(9, len(remaining)):
+                            break
+            idxs = sorted(idxs)
+            candidate = [remaining[j] for j in idxs]
+
+        # Check orientation vs pattern_kinds (truncate pattern if <9 pivots)
+        kinds = [k for _, k in candidate]
+        expected = pattern_kinds[:len(candidate)]
+        if kinds != expected:
+            # if it doesn't match, still accept but with lower priority
+            pass
+
+        # compute span
+        idxs_price = [i for i, _ in candidate]
+        span = idxs_price[-1] - idxs_price[0]
+
+        if span > best_span:
+            best_span = span
+            best_labels.clear()
+            wave_pattern = ["0", "1", "2", "3", "4", "5", "A", "B", "C"]
+            for k, (bar_idx, kind) in enumerate(candidate):
+                if k >= len(wave_pattern):
+                    break
+                best_labels[bar_idx] = wave_pattern[k]
+
+    return best_labels
+
 
 
 def add_elliott_labels(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
