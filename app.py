@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("📈 TradingView-Style Stock Dashboard")
-st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (Uptrend Thumb Rule)")
+st.caption("Hourly / Daily / Weekly — Candles + SMA + Volume + RSI + Wave 0 (RSI < 20)")
 
 
 # ---------------- DATA LOADER ----------------
@@ -77,15 +77,15 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------- WAVE 0 DETECTION (UPTREND THUMB RULE) ----------------
+# ---------------- WAVE 0 DETECTION (UPTREND THUMB RULE, RSI < 20) ----------------
 def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Wave 0 (Uptrend) Thumb Rule:
+    Wave 0 (Uptrend) Thumb Rule with stricter RSI:
 
     Wave 0 = LAST pivot low where:
       - It's a swing low (pivot low):
             Low[i] < Low[i-1] and Low[i] < Low[i+1]
-      - RSI_14[i] < 30   (oversold / exhaustion)
+      - RSI_14[i] < 20   (very oversold / strong exhaustion)
       - There exists a future bar j > i with High[j] > High[i] (Higher High)
 
     Only the LAST such pivot is marked as Wave 0 to avoid clutter.
@@ -109,8 +109,8 @@ def add_wave0_label(df: pd.DataFrame) -> pd.DataFrame:
         if not (lows[i] < lows[i - 1] and lows[i] < lows[i + 1]):
             continue
 
-        # RSI oversold
-        if np.isnan(rsi[i]) or rsi[i] >= 30:
+        # RSI very oversold
+        if np.isnan(rsi[i]) or rsi[i] >= 20:
             continue
 
         # Check for future Higher High
@@ -199,7 +199,7 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     mode="text",
                     text=["0"] * len(wave0_df),
                     textposition="middle center",
-                    name="Wave 0",
+                    name="Wave 0 (RSI < 20)",
                 ),
                 row=1,
                 col=1,
