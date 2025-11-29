@@ -40,10 +40,10 @@ def load_price_data(ticker: str, timeframe: str) -> pd.DataFrame:
     """Download OHLC data for selected timeframe and flatten columns."""
     if timeframe == "Daily":
         interval = "1d"
-        period = "1y"
+        period = "3y"
     elif timeframe == "Weekly":
         interval = "1wk"
-        period = "5y"
+        period = "10y"
     elif timeframe == "Hourly":
         interval = "60m"
         period = "60d"
