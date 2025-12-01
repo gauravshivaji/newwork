@@ -80,36 +80,52 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- WAVE 0 & 5 DETECTION ----------------
 def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Detect Wave 0 (bottom), Wave 1 (impulse high), Wave 2 (Fib retracement),
-    and Wave 5 (top).
+    Detect Wave 0, 1, 2, 3, 4, 5 using RSI + structural logic + Fibonacci rules.
 
     Wave 0:
       - RSI < 20, RSI rising, Close rising  OR  structural low
       - Future (15 bars) price higher than at 0
-      - If two 0s within 30 bars, keep the LOWER low
+      - If two 0s within 30 bars, keep LOWER low
+      - If 0,0 appear consecutively in time, drop FIRST
 
     Wave 5:
       - RSI > 80, RSI falling, Close falling  OR  structural high
       - Future (15 bars) price lower than at 5
-      - If two 5s within 30 bars, keep the HIGHER high
+      - If two 5s within 30 bars, keep HIGHER high
+      - If 5,5 appear consecutively in time, drop FIRST
 
-    Final 0/5 rule:
-      - If two 0s appear one after another in time, drop the FIRST 0
-      - If two 5s appear one after another in time, drop the FIRST 5
+    Inside each 0→5:
+      Wave 1:
+        - Swing high after 0, before 5
+        - Pivot high (highest in small window)
+        - First such swing high above low of 0
 
-    Wave 1 & 2 (inside each 0→5 segment):
-      - Find pivot highs (Wave 1) and pivot lows (Wave 2) such that:
-          * Wave 1 is a swing high after 0
-          * Wave 2 is a swing low after Wave 1 and before 5
-          * Wave 2 retraces 38.2%–78.6% of Wave 1
-          * Wave 2 low > Wave 0 low (no full retrace)
-      - Choose the (1,2) pair whose retracement is closest to 61.8%
+      Wave 2 (Fib retracement of Wave 1):
+        - Swing low after 1, before 5
+        - Retraces 38.2%–78.6% of Wave 1
+        - L2 > L0 (no full retrace)
+        - Choose pair (1,2) where retracement closest to 61.8%
+
+      Wave 3 (Fib extension of Wave 1 from 2):
+        - Pivot high after 2, before 5
+        - Extension ratio (H3 - L2)/(H1 - L0) between ~1.2 and 3.0
+        - H3 > H1
+        - Choose candidate closest to 1.618
+
+      Wave 4 (Fib retracement of Wave 3):
+        - Pivot low after 3, before 5
+        - Retracement (H3 - L4)/(H3 - L2) between 0.236 and 0.5
+        - L4 > H1 (no overlap with Wave 1)
+        - Choose retracement closest to 0.382
     """
     df = df.copy()
 
+    # init columns
     df["Wave0"] = False
     df["Wave1"] = False
     df["Wave2"] = False
+    df["Wave3"] = False
+    df["Wave4"] = False
     df["Wave5"] = False
 
     needed_cols = {"RSI_14", "Low", "High", "Close"}
@@ -123,8 +139,8 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     n = len(df)
     eps = 1e-8
-    min_gap = 30   # candles between same-type 0/0 or 5/5
-    pivot_k = 2    # window for swing high/low detection
+    min_gap = 30   # candles between same-type (for 0/5)
+    pivot_k = 2    # window for swing high/low
 
     # ---------------- WAVE 0 (BOTTOM) ----------------
 
@@ -169,7 +185,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 last_kept_0 = i
                 last_low_0 = this_low
 
-    # ---------------- WAVE 5 (TOP — OPPOSITE OF 0) ----------------
+    # ---------------- WAVE 5 (TOP) ----------------
 
     cond_rsi_price_5 = (rsi > 80) & (rsi < rsi.shift(1)) & (close < close.shift(1))
 
@@ -212,7 +228,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 last_kept_5 = i
                 last_high_5 = this_high
 
-    # ---------------- FINAL STEP ON 0 & 5: DROP FIRST IF 0,0 OR 5,5 IN A ROW ----------------
+    # ---------------- DROP FIRST IF 0,0 or 5,5 SEQUENTIAL ----------------
     events = []
     idx0 = np.where(final_wave0_mask)[0]
     idx5 = np.where(final_wave5_mask)[0]
@@ -239,7 +255,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 final_wave0_mask[last_index] = False
             else:
                 final_wave5_mask[last_index] = False
-
             last_index = idx
             last_type = typ
         else:
@@ -249,47 +264,41 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     df["Wave0"] = final_wave0_mask
     df["Wave5"] = final_wave5_mask
 
-    # ---------------- WAVE 1 & 2 (FIB-BASED INSIDE EACH 0→5) ----------------
+    # ---------------- WAVE 1 & 2 (FIB-BASED) ----------------
     wave1_mask = np.zeros(n, dtype=bool)
     wave2_mask = np.zeros(n, dtype=bool)
 
     wave0_idx = np.where(df["Wave0"].values)[0]
     wave5_idx = np.where(df["Wave5"].values)[0]
 
-    # we need consecutive 0→5 (0 before 5)
     for w0 in wave0_idx:
-        # find the first 5 after this 0
         later_5 = wave5_idx[wave5_idx > w0]
         if len(later_5) == 0:
             continue
         w5 = later_5[0]
 
-        # require enough candles between 0 and 5
         if w5 - w0 < 10:
             continue
 
-        low0 = low.iloc[w0]
+        L0 = low.iloc[w0]
 
-        best_score = np.inf
+        best_score_12 = np.inf
         best_w1 = None
         best_w2 = None
 
-        # scan for pivot highs as Wave 1
         start_w1 = w0 + pivot_k
-        end_w1 = w5 - pivot_k - 2   # leave some room for Wave2 and 5
+        end_w1 = w5 - pivot_k - 2
 
         for i in range(start_w1, max(start_w1, end_w1)):
-            # pivot high check
             window_h = high.iloc[i - pivot_k : i + pivot_k + 1]
             if high.iloc[i] < window_h.max():
                 continue
 
-            wave1_high = high.iloc[i]
-            wave1_height = wave1_high - low0
-            if wave1_height <= 0:
+            H1 = high.iloc[i]
+            len1 = H1 - L0
+            if len1 <= 0:
                 continue
 
-            # now search for pivot low after Wave1 as Wave2
             start_w2 = i + pivot_k
             end_w2 = w5 - pivot_k
 
@@ -298,22 +307,20 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 if low.iloc[j] > window_l.min():
                     continue
 
-                low2 = low.iloc[j]
+                L2 = low.iloc[j]
 
-                # Wave2 must stay above Wave0 low
-                if low2 <= low0:
+                if L2 <= L0:
                     continue
 
-                retr = (wave1_high - low2) / wave1_height  # Fibonacci retracement of Wave2
+                retr = (H1 - L2) / len1
 
                 if retr < 0.382 or retr > 0.786:
                     continue
 
-                # score closeness to golden ratio 0.618
                 score = abs(retr - 0.618)
 
-                if score < best_score:
-                    best_score = score
+                if score < best_score_12:
+                    best_score_12 = score
                     best_w1 = i
                     best_w2 = j
 
@@ -324,7 +331,115 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     df["Wave1"] = wave1_mask
     df["Wave2"] = wave2_mask
 
+    # ---------------- WAVE 3 & 4 (FIB-BASED) ----------------
+    wave3_mask = np.zeros(n, dtype=bool)
+    wave4_mask = np.zeros(n, dtype=bool)
+
+    wave1_idx = np.where(df["Wave1"].values)[0]
+    wave2_idx = np.where(df["Wave2"].values)[0]
+
+    for w0 in wave0_idx:
+        later_5 = wave5_idx[wave5_idx > w0]
+        if len(later_5) == 0:
+            continue
+        w5 = later_5[0]
+
+        # find 1 and 2 inside this segment
+        seg_w1 = wave1_idx[(wave1_idx > w0) & (wave1_idx < w5)]
+        seg_w2 = wave2_idx[(wave2_idx > w0) & (wave2_idx < w5)]
+        if len(seg_w1) == 0 or len(seg_w2) == 0:
+            continue
+
+        w1 = seg_w1[0]
+        # choose first 2 after that 1
+        seg_w2_after = seg_w2[seg_w2 > w1]
+        if len(seg_w2_after) == 0:
+            continue
+        w2 = seg_w2_after[0]
+
+        L0 = low.iloc[w0]
+        H1 = high.iloc[w1]
+        L2 = low.iloc[w2]
+
+        len1 = H1 - L0
+        if len1 <= 0:
+            continue
+
+        # --- Wave 3 candidates ---
+        best_score_3 = np.inf
+        best_w3 = None
+
+        start_w3 = w2 + pivot_k
+        end_w3 = w5 - pivot_k - 2
+
+        for i in range(start_w3, max(start_w3, end_w3)):
+            window_h = high.iloc[i - pivot_k : i + pivot_k + 1]
+            if high.iloc[i] < window_h.max():
+                continue
+
+            H3 = high.iloc[i]
+
+            if H3 <= H1:
+                continue
+
+            ext3 = (H3 - L2) / len1
+
+            if ext3 < 1.2 or ext3 > 3.0:
+                continue
+
+            score3 = abs(ext3 - 1.618)
+
+            if score3 < best_score_3:
+                best_score_3 = score3
+                best_w3 = i
+
+        if best_w3 is None:
+            continue
+
+        wave3_mask[best_w3] = True
+        H3 = high.iloc[best_w3]
+
+        # --- Wave 4 candidates ---
+        best_score_4 = np.inf
+        best_w4 = None
+
+        start_w4 = best_w3 + pivot_k
+        end_w4 = w5 - pivot_k
+
+        len3 = H3 - L2
+        if len3 <= 0:
+            continue
+
+        for j in range(start_w4, max(start_w4, end_w4)):
+            window_l = low.iloc[j - pivot_k : j + pivot_k + 1]
+            if low.iloc[j] > window_l.min():
+                continue
+
+            L4 = low.iloc[j]
+
+            # no overlap with wave1 territory
+            if L4 <= H1:
+                continue
+
+            retr4 = (H3 - L4) / len3
+
+            if retr4 < 0.236 or retr4 > 0.5:
+                continue
+
+            score4 = abs(retr4 - 0.382)
+
+            if score4 < best_score_4:
+                best_score_4 = score4
+                best_w4 = j
+
+        if best_w4 is not None:
+            wave4_mask[best_w4] = True
+
+    df["Wave3"] = wave3_mask
+    df["Wave4"] = wave4_mask
+
     return df
+
 
 
 # ---------------- BIG CHART ----------------
@@ -444,6 +559,39 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     text=["<b>2</b>"] * len(wave2_df),
                     textposition="middle center",
                     name="Wave 2",
+                ),
+                row=1,
+                col=1,
+            )
+        # --- Wave 3 labels (above highs) ---
+    if "Wave3" in df.columns:
+        wave3_df = df[df["Wave3"]]
+        if not wave3_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=wave3_df.index,
+                    y=wave3_df["High"] * 1.015,
+                    mode="text",
+                    text=["<b>3</b>"] * len(wave3_df),
+                    textposition="middle center",
+                    name="Wave 3",
+                ),
+                row=1,
+                col=1,
+            )
+
+    # --- Wave 4 labels (below lows) ---
+    if "Wave4" in df.columns:
+        wave4_df = df[df["Wave4"]]
+        if not wave4_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=wave4_df.index,
+                    y=wave4_df["Low"] * 0.985,
+                    mode="text",
+                    text=["<b>4</b>"] * len(wave4_df),
+                    textposition="middle center",
+                    name="Wave 4",
                 ),
                 row=1,
                 col=1,
