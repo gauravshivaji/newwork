@@ -132,6 +132,8 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Wave0"] = False
     df["Wave5"] = False
+    df["Wave1"] = False
+
 
     needed_cols = {"RSI_14", "Low", "High", "Close"}
     if df.empty or not needed_cols.issubset(df.columns):
@@ -249,6 +251,33 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 final_wave5_mask[i] = True
                 last_kept_5 = i
                 last_high_5 = this_high
+        # ---------------- WAVE 1 (first HH after Wave0) ----------------
+    df["Wave1"] = False
+
+    wave0_positions = np.where(df["Wave0"])[0]
+    wave5_positions = np.where(df["Wave5"])[0]
+
+    for i, w0 in enumerate(wave0_positions):
+
+        # search until next Wave5 or Wave0 (boundary)
+        if i < len(wave0_positions) - 1:
+            next_limit = wave0_positions[i + 1]    # until next 0
+        else:
+            next_limit = n                          # end of dataset
+
+        # Also stop at next 5 if earlier
+        next_fives = wave5_positions[wave5_positions > w0]
+        if len(next_fives) > 0:
+            next_5 = next_fives[0]
+            next_limit = min(next_limit, next_5)
+
+        base_high = df["High"].iloc[w0]
+
+        # find first higher-high after 0
+        for j in range(w0 + 1, next_limit):
+            if df["High"].iloc[j] > base_high:
+                df.at[df.index[j], "Wave1"] = True
+                break
 
     # ---------------- FINAL STEP: DROP FIRST IF 0,0 OR 5,5 IN A ROW ----------------
     # build event list of (index, type)
@@ -380,6 +409,22 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     text=["<b>5</b>"] * len(wave5_df),
                     textposition="middle center",
                     name="Wave 5",
+                ),
+                row=1,
+                col=1,
+            )
+        # --- Wave 1 labels ---
+    if "Wave1" in df.columns:
+        wave1_df = df[df["Wave1"]]
+        if not wave1_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=wave1_df.index,
+                    y=wave1_df["High"] * 1.01,
+                    mode="text",
+                    text=["<b>1</b>"] * len(wave1_df),
+                    textposition="middle center",
+                    name="Wave 1",
                 ),
                 row=1,
                 col=1,
