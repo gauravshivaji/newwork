@@ -288,32 +288,41 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     df["Wave5"] = final_wave5_mask
 
     # ---------------- WAVE 1 (first HH after Wave0) ----------------
+        # ---------------- WAVE 1 (first pivot HH after Wave0) ----------------
     df["Wave1"] = False
 
-    wave0_positions = np.where(df["Wave0"].values)[0]
-    wave5_positions = np.where(df["Wave5"].values)[0]
+    wave0_idx = np.where(df["Wave0"].values)[0]
+    wave5_idx = np.where(df["Wave5"].values)[0]
 
-    for i, w0 in enumerate(wave0_positions):
+    pivot_k = 2  # pivot window: look 2 bars left & right
 
-        # search until next Wave0 or Wave5 (boundary)
-        if i < len(wave0_positions) - 1:
-            next_limit = wave0_positions[i + 1]    # until next 0
-        else:
-            next_limit = n                          # end of dataset
+    for i, w0 in enumerate(wave0_idx):
 
-        # Also stop at next 5 if earlier
-        next_fives = wave5_positions[wave5_positions > w0]
-        if len(next_fives) > 0:
-            next_5 = next_fives[0]
-            next_limit = min(next_limit, next_5)
+        # search limit: until next 0 or next 5, whichever comes first
+        limit = len(df)
 
-        base_high = high.iloc[w0]
+        if i < len(wave0_idx) - 1:
+            limit = min(limit, wave0_idx[i + 1])
 
-        # find first higher-high after 0
-        for j in range(w0 + 1, next_limit):
-            if high.iloc[j] > base_high:
+        later5 = wave5_idx[wave5_idx > w0]
+        if len(later5) > 0:
+            limit = min(limit, later5[0])
+
+        base_high = df["High"].iloc[w0]
+
+        # scan forward for first pivot high with High > High at 0
+        start_j = w0 + 1 + pivot_k
+        end_j = max(start_j, limit - pivot_k)
+
+        for j in range(start_j, end_j):
+            window = df["High"].iloc[j - pivot_k : j + pivot_k + 1]
+            center_high = df["High"].iloc[j]
+
+            # pivot high + must be higher than 0's high
+            if center_high >= window.max() and center_high > base_high:
                 df.at[df.index[j], "Wave1"] = True
                 break
+
 
     return df
 
