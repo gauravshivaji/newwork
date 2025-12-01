@@ -132,7 +132,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Wave0"] = False
     df["Wave5"] = False
-    df["Wave1"] = False
+    
 
 
     needed_cols = {"RSI_14", "Low", "High", "Close"}
