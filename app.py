@@ -80,7 +80,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- WAVE 0 & 5 DETECTION ----------------
 def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Wave 0:
+    Detect Wave 0 (bottom) and Wave 5 (top).
+
+    Wave 0 (bottom logic):
 
       Base logic:
         Condition 1 (RSI + price):
@@ -91,26 +93,36 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
         OR
 
         Condition 2 (structural low):
-          - Low is lowest in centered 201-bar window (100 back + 100 forward)
+          - Low is lowest in centered window (extreme low)
 
-      Extra rule 1 (trend confirmation):
-        - After 7 candles, price must be higher than at 0:
-              Close[i+7] > Close[i]
+      Extra rule:
+        - After some future candles (here 15), price must be higher than at 0:
+              Close[i+15] > Close[i]
 
-      Extra rule 2 (spacing):
+      Spacing rule:
         - If two 0s are closer than 30 candles,
           keep the first one and remove the later one.
 
-      Final Wave0:
-        base_zero AND future_7_higher, then apply 30-bar spacing filter.
+    Wave 5 (TOP logic — opposite of 0):
 
-    Wave 5:
+      Base logic:
+        Condition 1 (RSI + price, reversed):
+          - RSI > 80
+          - RSI falling (rsi[i] < rsi[i-1])
+          - Close falling (close[i] < close[i-1])
 
-      - Take all final Wave0 positions
-      - For each pair of consecutive 0s:
-          look between them (exclusive of second 0)
-          find highest High in that segment
-          mark that bar as Wave 5
+        OR
+
+        Condition 2 (structural high):
+          - High is highest in centered window (extreme high)
+
+      Extra rule:
+        - After some future candles (here 15), price must be LOWER than at 5:
+              Close[i+15] < Close[i]
+
+      Spacing rule:
+        - If two 5s are closer than 30 candles,
+          keep the first one and remove the later one.
     """
     df = df.copy()
 
@@ -123,63 +135,75 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     rsi = df["RSI_14"]
     close = df["Close"]
+    low = df["Low"]
+    high = df["High"]
 
-    # ---- Wave 0 base conditions ----
-
-    # Condition 1: RSI < 20 AND RSI increasing AND price increasing (on that candle)
-    cond_rsi_price = (rsi < 20) & (rsi > rsi.shift(1)) & (close > close.shift(1))
-
-    # Condition 2: Extreme 100-bar low (centered 201 bars)
-    rolling_min_low = df["Low"].rolling(window=101, center=True, min_periods=1).min()
-    eps = 1e-8
-    cond_extreme_low = df["Low"] <= (rolling_min_low + eps)
-
-    base_zero = cond_rsi_price | cond_extreme_low
-
-    # ---- Extra rule 1: after 7 candles, price should be greater than at 0 ----
     n = len(df)
-    future_7_higher = np.zeros(n, dtype=bool)
+    eps = 1e-8
 
+    # ---------------- WAVE 0 (BOTTOM) ----------------
+
+    # Condition 1: RSI < 20 AND RSI increasing AND price increasing
+    cond_rsi_price_0 = (rsi < 20) & (rsi > rsi.shift(1)) & (close > close.shift(1))
+
+    # Condition 2: structural low (extreme low in centered window)
+    rolling_min_low = low.rolling(window=101, center=True, min_periods=1).min()
+    cond_extreme_low = low <= (rolling_min_low + eps)
+
+    base_zero = cond_rsi_price_0 | cond_extreme_low
+
+    # Extra rule: after 15 candles, price should be higher than at 0
+    future_7_higher = np.zeros(n, dtype=bool)
     for i in range(n - 15):
         if close.iloc[i + 15] > close.iloc[i]:
             future_7_higher[i] = True
 
-    # Initial Wave0 mask before spacing filter
     wave0_mask = base_zero & future_7_higher
 
-    # ---- Extra rule 2: enforce minimum 30-candle distance between 0s ----
-    idx_candidates = np.where(wave0_mask)[0]
+    # Spacing rule: keep 0s at least 30 bars apart
+    idx_candidates_0 = np.where(wave0_mask)[0]
     final_wave0_mask = np.zeros(n, dtype=bool)
 
-    min_gap = 30  # minimum distance between 0s in candles
+    min_gap = 30
     last_kept = -10**9
 
-    for i in idx_candidates:
+    for i in idx_candidates_0:
         if i - last_kept >= min_gap:
             final_wave0_mask[i] = True
             last_kept = i
-        # else: too close to previous 0, discard this one
 
     df["Wave0"] = final_wave0_mask
 
-    # ---- Wave 5: highest High between two 0s ----
-    wave0_positions = np.where(df["Wave0"].values)[0]
+    # ---------------- WAVE 5 (TOP — OPPOSITE OF 0) ----------------
 
-    if len(wave0_positions) >= 2:
-        for k in range(len(wave0_positions) - 1):
-            start_i = wave0_positions[k]
-            end_i = wave0_positions[k + 1]
+    # Condition 1: RSI > 80 AND RSI decreasing AND price decreasing
+    cond_rsi_price_5 = (rsi > 80) & (rsi < rsi.shift(1)) & (close < close.shift(1))
 
-            # Segment is strictly between the two 0s → (start_i, end_i)
-            if end_i - start_i <= 1:
-                continue
+    # Condition 2: structural high (extreme high in centered window)
+    rolling_max_high = high.rolling(window=101, center=True, min_periods=1).max()
+    cond_extreme_high = high >= (rolling_max_high - eps)
 
-            seg = df.iloc[start_i + 1 : end_i]
-            if seg.empty:
-                continue
+    base_five = cond_rsi_price_5 | cond_extreme_high
 
-            idx_max_high = seg["High"].idxmax()
-            df.loc[idx_max_high, "Wave5"] = True
+    # Extra rule: after 15 candles, price should be LOWER than at 5
+    future_7_lower = np.zeros(n, dtype=bool)
+    for i in range(n - 15):
+        if close.iloc[i + 15] < close.iloc[i]:
+            future_7_lower[i] = True
+
+    wave5_mask = base_five & future_7_lower
+
+    # Spacing rule: keep 5s at least 30 bars apart
+    idx_candidates_5 = np.where(wave5_mask)[0]
+    final_wave5_mask = np.zeros(n, dtype=bool)
+
+    last_kept_5 = -10**9
+    for i in idx_candidates_5:
+        if i - last_kept_5 >= min_gap:
+            final_wave5_mask[i] = True
+            last_kept_5 = i
+
+    df["Wave5"] = final_wave5_mask
 
     return df
 
