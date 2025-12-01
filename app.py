@@ -101,7 +101,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
       Spacing rule:
         - If two 0s are closer than 30 candles,
-          keep the first one and remove the later one.
+          keep ONLY the lower one (smaller Low).
 
     Wave 5 (TOP logic — opposite of 0):
 
@@ -122,7 +122,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
       Spacing rule:
         - If two 5s are closer than 30 candles,
-          keep the first one and remove the later one.
+          keep ONLY the higher one (larger High).
     """
     df = df.copy()
 
@@ -140,6 +140,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     n = len(df)
     eps = 1e-8
+    min_gap = 30   # candles
 
     # ---------------- WAVE 0 (BOTTOM) ----------------
 
@@ -160,17 +161,38 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     wave0_mask = base_zero & future_7_higher
 
-    # Spacing rule: keep 0s at least 30 bars apart
+    # Spacing rule with "keep lower 0"
     idx_candidates_0 = np.where(wave0_mask)[0]
     final_wave0_mask = np.zeros(n, dtype=bool)
 
-    min_gap = 30
-    last_kept = -10**9
+    last_kept_0 = None
+    last_low_0 = None
 
     for i in idx_candidates_0:
-        if i - last_kept >= min_gap:
+        this_low = low.iloc[i]
+
+        if last_kept_0 is None:
+            # first candidate
             final_wave0_mask[i] = True
-            last_kept = i
+            last_kept_0 = i
+            last_low_0 = this_low
+        else:
+            if i - last_kept_0 < min_gap:
+                # conflict: two 0s too close → keep the lower one
+                if this_low < last_low_0:
+                    # switch mark to this new, lower low
+                    final_wave0_mask[last_kept_0] = False
+                    final_wave0_mask[i] = True
+                    last_kept_0 = i
+                    last_low_0 = this_low
+                else:
+                    # keep old, ignore new
+                    continue
+            else:
+                # far enough → accept as new 0
+                final_wave0_mask[i] = True
+                last_kept_0 = i
+                last_low_0 = this_low
 
     df["Wave0"] = final_wave0_mask
 
@@ -193,19 +215,43 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     wave5_mask = base_five & future_7_lower
 
-    # Spacing rule: keep 5s at least 30 bars apart
+    # Spacing rule with "keep higher 5"
     idx_candidates_5 = np.where(wave5_mask)[0]
     final_wave5_mask = np.zeros(n, dtype=bool)
 
-    last_kept_5 = -10**9
+    last_kept_5 = None
+    last_high_5 = None
+
     for i in idx_candidates_5:
-        if i - last_kept_5 >= min_gap:
+        this_high = high.iloc[i]
+
+        if last_kept_5 is None:
+            # first candidate
             final_wave5_mask[i] = True
             last_kept_5 = i
+            last_high_5 = this_high
+        else:
+            if i - last_kept_5 < min_gap:
+                # conflict: two 5s too close → keep the higher one
+                if this_high > last_high_5:
+                    # switch mark to this new, higher high
+                    final_wave5_mask[last_kept_5] = False
+                    final_wave5_mask[i] = True
+                    last_kept_5 = i
+                    last_high_5 = this_high
+                else:
+                    # keep old, ignore new
+                    continue
+            else:
+                # far enough → accept as new 5
+                final_wave5_mask[i] = True
+                last_kept_5 = i
+                last_high_5 = this_high
 
     df["Wave5"] = final_wave5_mask
 
     return df
+
 
 
 # ---------------- BIG CHART ----------------
