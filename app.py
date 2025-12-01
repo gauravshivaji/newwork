@@ -123,6 +123,10 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
       Spacing rule:
         - If two 5s are closer than 30 candles,
           keep ONLY the higher one (larger High).
+
+    Final rule:
+      - If two 0s appear one after another in time, drop the FIRST 0.
+      - If two 5s appear one after another in time, drop the FIRST 5.
     """
     df = df.copy()
 
@@ -194,8 +198,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 last_kept_0 = i
                 last_low_0 = this_low
 
-    df["Wave0"] = final_wave0_mask
-
     # ---------------- WAVE 5 (TOP — OPPOSITE OF 0) ----------------
 
     # Condition 1: RSI > 80 AND RSI decreasing AND price decreasing
@@ -248,6 +250,45 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 last_kept_5 = i
                 last_high_5 = this_high
 
+    # ---------------- FINAL STEP: DROP FIRST IF 0,0 OR 5,5 IN A ROW ----------------
+    # build event list of (index, type)
+    events = []
+    idx0 = np.where(final_wave0_mask)[0]
+    idx5 = np.where(final_wave5_mask)[0]
+
+    for idx in idx0:
+        events.append((idx, "0"))
+    for idx in idx5:
+        events.append((idx, "5"))
+
+    # sort by time
+    events.sort(key=lambda x: x[0])
+
+    last_type = None
+    last_index = None
+
+    for idx, typ in events:
+        if last_type is None:
+            last_type = typ
+            last_index = idx
+            continue
+
+        if typ == last_type:
+            # same type → DROP FIRST, keep current
+            if last_type == "0":
+                final_wave0_mask[last_index] = False
+            else:
+                final_wave5_mask[last_index] = False
+
+            # update last pointer to the one we kept (current)
+            last_index = idx
+            last_type = typ
+        else:
+            # alternation OK
+            last_type = typ
+            last_index = idx
+
+    df["Wave0"] = final_wave0_mask
     df["Wave5"] = final_wave5_mask
 
     return df
