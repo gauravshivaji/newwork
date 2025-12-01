@@ -80,63 +80,37 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- WAVE 0 & 5 DETECTION ----------------
 def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Detect Wave 0 (bottom), Wave 1 (first HH after 0), and Wave 5 (top).
+    Detect Wave 0 (bottom), Wave 1 (impulse high), Wave 2 (Fib retracement),
+    and Wave 5 (top).
 
-    Wave 0 (bottom logic):
+    Wave 0:
+      - RSI < 20, RSI rising, Close rising  OR  structural low
+      - Future (15 bars) price higher than at 0
+      - If two 0s within 30 bars, keep the LOWER low
 
-      Base logic:
-        Condition 1 (RSI + price):
-          - RSI < 20
-          - RSI rising (rsi[i] > rsi[i-1])
-          - Close rising (close[i] > close[i-1])
+    Wave 5:
+      - RSI > 80, RSI falling, Close falling  OR  structural high
+      - Future (15 bars) price lower than at 5
+      - If two 5s within 30 bars, keep the HIGHER high
 
-        OR
+    Final 0/5 rule:
+      - If two 0s appear one after another in time, drop the FIRST 0
+      - If two 5s appear one after another in time, drop the FIRST 5
 
-        Condition 2 (structural low):
-          - Low is lowest in centered window (extreme low)
-
-      Extra rule:
-        - After some future candles (here 15), price must be higher than at 0:
-              Close[i+15] > Close[i]
-
-      Spacing rule:
-        - If two 0s are closer than 30 candles,
-          keep ONLY the lower one (smaller Low).
-
-    Wave 5 (TOP logic — opposite of 0):
-
-      Base logic:
-        Condition 1 (RSI + price, reversed):
-          - RSI > 80
-          - RSI falling (rsi[i] < rsi[i-1])
-          - Close falling (close[i] < close[i-1])
-
-        OR
-
-        Condition 2 (structural high):
-          - High is highest in centered window (extreme high)
-
-      Extra rule:
-        - After some future candles (here 15), price must be LOWER than at 5:
-              Close[i+15] < Close[i]
-
-      Spacing rule:
-        - If two 5s are closer than 30 candles,
-          keep ONLY the higher one (larger High).
-
-    Final rule:
-      - If two 0s appear one after another in time, drop the FIRST 0.
-      - If two 5s appear one after another in time, drop the FIRST 5.
-
-    Wave 1:
-      - For each Wave 0, mark the first higher high after 0,
-        searching until the next 0 or 5 (whichever comes first).
+    Wave 1 & 2 (inside each 0→5 segment):
+      - Find pivot highs (Wave 1) and pivot lows (Wave 2) such that:
+          * Wave 1 is a swing high after 0
+          * Wave 2 is a swing low after Wave 1 and before 5
+          * Wave 2 retraces 38.2%–78.6% of Wave 1
+          * Wave 2 low > Wave 0 low (no full retrace)
+      - Choose the (1,2) pair whose retracement is closest to 61.8%
     """
     df = df.copy()
 
     df["Wave0"] = False
-    df["Wave5"] = False
     df["Wave1"] = False
+    df["Wave2"] = False
+    df["Wave5"] = False
 
     needed_cols = {"RSI_14", "Low", "High", "Close"}
     if df.empty or not needed_cols.issubset(df.columns):
@@ -149,20 +123,18 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     n = len(df)
     eps = 1e-8
-    min_gap = 30   # candles
+    min_gap = 30   # candles between same-type 0/0 or 5/5
+    pivot_k = 2    # window for swing high/low detection
 
     # ---------------- WAVE 0 (BOTTOM) ----------------
 
-    # Condition 1: RSI < 20 AND RSI increasing AND price increasing
     cond_rsi_price_0 = (rsi < 20) & (rsi > rsi.shift(1)) & (close > close.shift(1))
 
-    # Condition 2: structural low (extreme low in centered window)
     rolling_min_low = low.rolling(window=101, center=True, min_periods=1).min()
     cond_extreme_low = low <= (rolling_min_low + eps)
 
     base_zero = cond_rsi_price_0 | cond_extreme_low
 
-    # Extra rule: after 15 candles, price should be higher than at 0
     future_15_higher = np.zeros(n, dtype=bool)
     for i in range(n - 15):
         if close.iloc[i + 15] > close.iloc[i]:
@@ -170,7 +142,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     wave0_mask = base_zero & future_15_higher
 
-    # Spacing rule with "keep lower 0"
     idx_candidates_0 = np.where(wave0_mask)[0]
     final_wave0_mask = np.zeros(n, dtype=bool)
 
@@ -181,13 +152,11 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
         this_low = low.iloc[i]
 
         if last_kept_0 is None:
-            # first candidate
             final_wave0_mask[i] = True
             last_kept_0 = i
             last_low_0 = this_low
         else:
             if i - last_kept_0 < min_gap:
-                # conflict: two 0s too close → keep the lower one
                 if this_low < last_low_0:
                     final_wave0_mask[last_kept_0] = False
                     final_wave0_mask[i] = True
@@ -196,23 +165,19 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 else:
                     continue
             else:
-                # far enough → accept as new 0
                 final_wave0_mask[i] = True
                 last_kept_0 = i
                 last_low_0 = this_low
 
     # ---------------- WAVE 5 (TOP — OPPOSITE OF 0) ----------------
 
-    # Condition 1: RSI > 80 AND RSI decreasing AND price decreasing
     cond_rsi_price_5 = (rsi > 80) & (rsi < rsi.shift(1)) & (close < close.shift(1))
 
-    # Condition 2: structural high (extreme high in centered window)
     rolling_max_high = high.rolling(window=101, center=True, min_periods=1).max()
     cond_extreme_high = high >= (rolling_max_high - eps)
 
     base_five = cond_rsi_price_5 | cond_extreme_high
 
-    # Extra rule: after 15 candles, price should be LOWER than at 5
     future_15_lower = np.zeros(n, dtype=bool)
     for i in range(n - 15):
         if close.iloc[i + 15] < close.iloc[i]:
@@ -220,7 +185,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
 
     wave5_mask = base_five & future_15_lower
 
-    # Spacing rule with "keep higher 5"
     idx_candidates_5 = np.where(wave5_mask)[0]
     final_wave5_mask = np.zeros(n, dtype=bool)
 
@@ -236,7 +200,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
             last_high_5 = this_high
         else:
             if i - last_kept_5 < min_gap:
-                # conflict: two 5s too close → keep the higher one
                 if this_high > last_high_5:
                     final_wave5_mask[last_kept_5] = False
                     final_wave5_mask[i] = True
@@ -249,7 +212,7 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
                 last_kept_5 = i
                 last_high_5 = this_high
 
-    # ---------------- FINAL STEP: DROP FIRST IF 0,0 OR 5,5 IN A ROW ----------------
+    # ---------------- FINAL STEP ON 0 & 5: DROP FIRST IF 0,0 OR 5,5 IN A ROW ----------------
     events = []
     idx0 = np.where(final_wave0_mask)[0]
     idx5 = np.where(final_wave5_mask)[0]
@@ -283,46 +246,83 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
             last_type = typ
             last_index = idx
 
-    # Write final 0 and 5 columns
     df["Wave0"] = final_wave0_mask
     df["Wave5"] = final_wave5_mask
 
-    # ---------------- WAVE 1 (first HH after Wave0) ----------------
-        # ---------------- WAVE 1 (first pivot HH after Wave0) ----------------
-    df["Wave1"] = False
+    # ---------------- WAVE 1 & 2 (FIB-BASED INSIDE EACH 0→5) ----------------
+    wave1_mask = np.zeros(n, dtype=bool)
+    wave2_mask = np.zeros(n, dtype=bool)
 
     wave0_idx = np.where(df["Wave0"].values)[0]
     wave5_idx = np.where(df["Wave5"].values)[0]
 
-    pivot_k = 2  # pivot window: look 2 bars left & right
+    # we need consecutive 0→5 (0 before 5)
+    for w0 in wave0_idx:
+        # find the first 5 after this 0
+        later_5 = wave5_idx[wave5_idx > w0]
+        if len(later_5) == 0:
+            continue
+        w5 = later_5[0]
 
-    for i, w0 in enumerate(wave0_idx):
+        # require enough candles between 0 and 5
+        if w5 - w0 < 10:
+            continue
 
-        # search limit: until next 0 or next 5, whichever comes first
-        limit = len(df)
+        low0 = low.iloc[w0]
 
-        if i < len(wave0_idx) - 1:
-            limit = min(limit, wave0_idx[i + 1])
+        best_score = np.inf
+        best_w1 = None
+        best_w2 = None
 
-        later5 = wave5_idx[wave5_idx > w0]
-        if len(later5) > 0:
-            limit = min(limit, later5[0])
+        # scan for pivot highs as Wave 1
+        start_w1 = w0 + pivot_k
+        end_w1 = w5 - pivot_k - 2   # leave some room for Wave2 and 5
 
-        base_high = df["High"].iloc[w0]
+        for i in range(start_w1, max(start_w1, end_w1)):
+            # pivot high check
+            window_h = high.iloc[i - pivot_k : i + pivot_k + 1]
+            if high.iloc[i] < window_h.max():
+                continue
 
-        # scan forward for first pivot high with High > High at 0
-        start_j = w0 + 1 + pivot_k
-        end_j = max(start_j, limit - pivot_k)
+            wave1_high = high.iloc[i]
+            wave1_height = wave1_high - low0
+            if wave1_height <= 0:
+                continue
 
-        for j in range(start_j, end_j):
-            window = df["High"].iloc[j - pivot_k : j + pivot_k + 1]
-            center_high = df["High"].iloc[j]
+            # now search for pivot low after Wave1 as Wave2
+            start_w2 = i + pivot_k
+            end_w2 = w5 - pivot_k
 
-            # pivot high + must be higher than 0's high
-            if center_high >= window.max() and center_high > base_high:
-                df.at[df.index[j], "Wave1"] = True
-                break
+            for j in range(start_w2, max(start_w2, end_w2)):
+                window_l = low.iloc[j - pivot_k : j + pivot_k + 1]
+                if low.iloc[j] > window_l.min():
+                    continue
 
+                low2 = low.iloc[j]
+
+                # Wave2 must stay above Wave0 low
+                if low2 <= low0:
+                    continue
+
+                retr = (wave1_high - low2) / wave1_height  # Fibonacci retracement of Wave2
+
+                if retr < 0.382 or retr > 0.786:
+                    continue
+
+                # score closeness to golden ratio 0.618
+                score = abs(retr - 0.618)
+
+                if score < best_score:
+                    best_score = score
+                    best_w1 = i
+                    best_w2 = j
+
+        if best_w1 is not None and best_w2 is not None:
+            wave1_mask[best_w1] = True
+            wave2_mask[best_w2] = True
+
+    df["Wave1"] = wave1_mask
+    df["Wave2"] = wave2_mask
 
     return df
 
@@ -428,6 +428,22 @@ def make_tv_style_chart(df: pd.DataFrame, title: str):
                     text=["<b>1</b>"] * len(wave1_df),
                     textposition="middle center",
                     name="Wave 1",
+                ),
+                row=1,
+                col=1,
+            )
+        # --- Wave 2 labels (below lows) ---
+    if "Wave2" in df.columns:
+        wave2_df = df[df["Wave2"]]
+        if not wave2_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=wave2_df.index,
+                    y=wave2_df["Low"] * 0.99,
+                    mode="text",
+                    text=["<b>2</b>"] * len(wave2_df),
+                    textposition="middle center",
+                    name="Wave 2",
                 ),
                 row=1,
                 col=1,
