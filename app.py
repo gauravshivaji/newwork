@@ -80,7 +80,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- WAVE 0 & 5 DETECTION ----------------
 def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Detect Wave 0 (bottom) and Wave 5 (top).
+    Detect Wave 0 (bottom), Wave 1 (first HH after 0), and Wave 5 (top).
 
     Wave 0 (bottom logic):
 
@@ -127,13 +127,16 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     Final rule:
       - If two 0s appear one after another in time, drop the FIRST 0.
       - If two 5s appear one after another in time, drop the FIRST 5.
+
+    Wave 1:
+      - For each Wave 0, mark the first higher high after 0,
+        searching until the next 0 or 5 (whichever comes first).
     """
     df = df.copy()
 
     df["Wave0"] = False
     df["Wave5"] = False
-    
-
+    df["Wave1"] = False
 
     needed_cols = {"RSI_14", "Low", "High", "Close"}
     if df.empty or not needed_cols.issubset(df.columns):
@@ -160,12 +163,12 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     base_zero = cond_rsi_price_0 | cond_extreme_low
 
     # Extra rule: after 15 candles, price should be higher than at 0
-    future_7_higher = np.zeros(n, dtype=bool)
+    future_15_higher = np.zeros(n, dtype=bool)
     for i in range(n - 15):
         if close.iloc[i + 15] > close.iloc[i]:
-            future_7_higher[i] = True
+            future_15_higher[i] = True
 
-    wave0_mask = base_zero & future_7_higher
+    wave0_mask = base_zero & future_15_higher
 
     # Spacing rule with "keep lower 0"
     idx_candidates_0 = np.where(wave0_mask)[0]
@@ -186,13 +189,11 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
             if i - last_kept_0 < min_gap:
                 # conflict: two 0s too close → keep the lower one
                 if this_low < last_low_0:
-                    # switch mark to this new, lower low
                     final_wave0_mask[last_kept_0] = False
                     final_wave0_mask[i] = True
                     last_kept_0 = i
                     last_low_0 = this_low
                 else:
-                    # keep old, ignore new
                     continue
             else:
                 # far enough → accept as new 0
@@ -212,12 +213,12 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     base_five = cond_rsi_price_5 | cond_extreme_high
 
     # Extra rule: after 15 candles, price should be LOWER than at 5
-    future_7_lower = np.zeros(n, dtype=bool)
+    future_15_lower = np.zeros(n, dtype=bool)
     for i in range(n - 15):
         if close.iloc[i + 15] < close.iloc[i]:
-            future_7_lower[i] = True
+            future_15_lower[i] = True
 
-    wave5_mask = base_five & future_7_lower
+    wave5_mask = base_five & future_15_lower
 
     # Spacing rule with "keep higher 5"
     idx_candidates_5 = np.where(wave5_mask)[0]
@@ -230,7 +231,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
         this_high = high.iloc[i]
 
         if last_kept_5 is None:
-            # first candidate
             final_wave5_mask[i] = True
             last_kept_5 = i
             last_high_5 = this_high
@@ -238,49 +238,18 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
             if i - last_kept_5 < min_gap:
                 # conflict: two 5s too close → keep the higher one
                 if this_high > last_high_5:
-                    # switch mark to this new, higher high
                     final_wave5_mask[last_kept_5] = False
                     final_wave5_mask[i] = True
                     last_kept_5 = i
                     last_high_5 = this_high
                 else:
-                    # keep old, ignore new
                     continue
             else:
-                # far enough → accept as new 5
                 final_wave5_mask[i] = True
                 last_kept_5 = i
                 last_high_5 = this_high
-        # ---------------- WAVE 1 (first HH after Wave0) ----------------
-    df["Wave1"] = False
-
-    wave0_positions = np.where(df["Wave0"])[0]
-    wave5_positions = np.where(df["Wave5"])[0]
-
-    for i, w0 in enumerate(wave0_positions):
-
-        # search until next Wave5 or Wave0 (boundary)
-        if i < len(wave0_positions) - 1:
-            next_limit = wave0_positions[i + 1]    # until next 0
-        else:
-            next_limit = n                          # end of dataset
-
-        # Also stop at next 5 if earlier
-        next_fives = wave5_positions[wave5_positions > w0]
-        if len(next_fives) > 0:
-            next_5 = next_fives[0]
-            next_limit = min(next_limit, next_5)
-
-        base_high = df["High"].iloc[w0]
-
-        # find first higher-high after 0
-        for j in range(w0 + 1, next_limit):
-            if df["High"].iloc[j] > base_high:
-                df.at[df.index[j], "Wave1"] = True
-                break
 
     # ---------------- FINAL STEP: DROP FIRST IF 0,0 OR 5,5 IN A ROW ----------------
-    # build event list of (index, type)
     events = []
     idx0 = np.where(final_wave0_mask)[0]
     idx5 = np.where(final_wave5_mask)[0]
@@ -290,7 +259,6 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
     for idx in idx5:
         events.append((idx, "5"))
 
-    # sort by time
     events.sort(key=lambda x: x[0])
 
     last_type = None
@@ -309,19 +277,45 @@ def add_wave_labels(df: pd.DataFrame) -> pd.DataFrame:
             else:
                 final_wave5_mask[last_index] = False
 
-            # update last pointer to the one we kept (current)
             last_index = idx
             last_type = typ
         else:
-            # alternation OK
             last_type = typ
             last_index = idx
 
+    # Write final 0 and 5 columns
     df["Wave0"] = final_wave0_mask
     df["Wave5"] = final_wave5_mask
 
-    return df
+    # ---------------- WAVE 1 (first HH after Wave0) ----------------
+    df["Wave1"] = False
 
+    wave0_positions = np.where(df["Wave0"].values)[0]
+    wave5_positions = np.where(df["Wave5"].values)[0]
+
+    for i, w0 in enumerate(wave0_positions):
+
+        # search until next Wave0 or Wave5 (boundary)
+        if i < len(wave0_positions) - 1:
+            next_limit = wave0_positions[i + 1]    # until next 0
+        else:
+            next_limit = n                          # end of dataset
+
+        # Also stop at next 5 if earlier
+        next_fives = wave5_positions[wave5_positions > w0]
+        if len(next_fives) > 0:
+            next_5 = next_fives[0]
+            next_limit = min(next_limit, next_5)
+
+        base_high = high.iloc[w0]
+
+        # find first higher-high after 0
+        for j in range(w0 + 1, next_limit):
+            if high.iloc[j] > base_high:
+                df.at[df.index[j], "Wave1"] = True
+                break
+
+    return df
 
 
 # ---------------- BIG CHART ----------------
